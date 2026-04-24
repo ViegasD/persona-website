@@ -358,7 +358,12 @@ async def checkout(
 
     qr_png = mercadopago_client.render_qr_png(pix["qr_code"])
     qr_key = storage.storefront_key("orders", str(order.id), "pix.png")
-    storage.upload_bytes(qr_key, qr_png, content_type="image/png")
+    qr_url = ""
+    try:
+        storage.upload_bytes(qr_key, qr_png, content_type="image/png")
+        qr_url = storage.presigned_get_url(qr_key, 1800)
+    except Exception:
+        qr_key = None  # type: ignore[assignment]
 
     payment = Payment(
         order_id=order.id,
@@ -381,7 +386,7 @@ async def checkout(
         payment_id=payment.id,
         qr_code_payload=pix["qr_code"],
         qr_code_base64=pix["qr_code_base64"] or None,
-        qr_code_url=storage.presigned_get_url(qr_key, 1800),
+        qr_code_url=qr_url,
         ticket_url=pix["ticket_url"] or None,
         expires_at=pix["expires_at"],
         amount_cents=order.total_cents,
