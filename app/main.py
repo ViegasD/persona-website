@@ -33,7 +33,7 @@ def create_app() -> FastAPI:
     if settings.env == "development":
         cors_origins: list[str] = ["*"]
     else:
-        cors_origins = [o.strip() for o in settings.web_base_url.split(",") if o.strip()]
+        cors_origins = [o.strip().rstrip("/") for o in settings.web_base_url.split(",") if o.strip()]
     app.add_middleware(
         CORSMiddleware,
         allow_origins=cors_origins,
