@@ -333,19 +333,25 @@ async def checkout(
             .order_by(Payment.id.desc())
         )
     ).scalar_one_or_none()
-    if existing is not None and existing.qr_code_payload:
-        return OrderCheckoutOut(
-            order_id=order.id,
-            payment_id=existing.id,
-            qr_code_payload=existing.qr_code_payload,
-            qr_code_base64=None,
-            qr_code_url=storage.presigned_get_url(cast(str, existing.qr_code_s3_key), 1800)
-            if existing.qr_code_s3_key
-            else "",
-            ticket_url=existing.ticket_url,
-            expires_at=existing.expires_at,
-            amount_cents=existing.amount_cents,
-        )
+    if existing is not None:
+        if existing.qr_code_payload:
+            # Valid prior attempt — return it directly.
+            return OrderCheckoutOut(
+                order_id=order.id,
+                payment_id=existing.id,
+                qr_code_payload=existing.qr_code_payload,
+                qr_code_base64=None,
+                qr_code_url=storage.presigned_get_url(cast(str, existing.qr_code_s3_key), 1800)
+                if existing.qr_code_s3_key
+                else "",
+                ticket_url=existing.ticket_url,
+                expires_at=existing.expires_at,
+                amount_cents=existing.amount_cents,
+            )
+        else:
+            # Failed prior attempt (no QR code) — delete it so we can retry.
+            await session.delete(existing)
+            await session.flush()
 
     notification_url = f"{settings.api_base_url.rstrip('/')}/api/v1/payments/mercadopago/webhook"
     pix = await mercadopago_client.create_pix_payment(

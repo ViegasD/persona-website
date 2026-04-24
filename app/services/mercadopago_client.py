@@ -61,10 +61,15 @@ async def create_pix_payment(
         return _sdk().payment().create({"body": body})
 
     response = await asyncio.to_thread(_create)
+    http_status = response.get("status")
     payment = response.get("response", {})
+    payment_id = payment.get("id")
+    if not payment_id or (isinstance(http_status, int) and http_status >= 400):
+        error_msg = payment.get("message") or payment.get("error") or f"MercadoPago error (HTTP {http_status})"
+        raise RuntimeError(f"MercadoPago payment creation failed: {error_msg}")
     transaction_data = (payment.get("point_of_interaction") or {}).get("transaction_data") or {}
     return {
-        "payment_id": str(payment.get("id")),
+        "payment_id": str(payment_id),
         "qr_code": transaction_data.get("qr_code", ""),
         "qr_code_base64": transaction_data.get("qr_code_base64", ""),
         "ticket_url": transaction_data.get("ticket_url", ""),
