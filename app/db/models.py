@@ -146,13 +146,13 @@ class Plan(Base):
     video_count: Mapped[int] = mapped_column(Integer, nullable=False)
     max_characters_per_video: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
     personalization_level: Mapped[PersonalizationLevel] = mapped_column(
-        Enum(PersonalizationLevel, name="personalization_level", schema=SCHEMA),
+        Enum(PersonalizationLevel, name="personalization_level", schema=SCHEMA, values_callable=lambda obj: [e.value for e in obj]),
         default=PersonalizationLevel.MEDIUM,
         nullable=False,
     )
     is_subscription: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     billing_period: Mapped[BillingPeriod | None] = mapped_column(
-        Enum(BillingPeriod, name="billing_period", schema=SCHEMA)
+        Enum(BillingPeriod, name="billing_period", schema=SCHEMA, values_callable=lambda obj: [e.value for e in obj])
     )
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     sort_order: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
