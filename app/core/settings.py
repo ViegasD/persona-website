@@ -19,7 +19,8 @@ class Settings(BaseSettings):
     # --- App ---
     env: str = Field("development", alias="STOREFRONT_ENV")
     api_base_url: str = Field("http://localhost:8000", alias="STOREFRONT_API_BASE_URL")
-    web_base_url: str = Field("http://localhost:3001", alias="STOREFRONT_WEB_BASE_URL")
+    # Comma-separated list of allowed CORS origins, e.g. "https://persona.com,http://localhost:3000"
+    web_base_url: str = Field("http://localhost:3000", alias="STOREFRONT_WEB_BASE_URL")
     log_level: str = Field("INFO", alias="STOREFRONT_LOG_LEVEL")
 
     # --- Database (shared with Node backend; we only write to schema "web") ---
