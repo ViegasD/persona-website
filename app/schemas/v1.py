@@ -90,12 +90,20 @@ class OccasionOut(BaseModel):
 
 
 class OrderItemCreate(BaseModel):
-    character_ids: list[int] = Field(..., min_length=1, max_length=4)
+    character_ids: list[str] = Field(..., min_length=1, max_length=4)
+    custom_message: str | None = Field(None, max_length=400)
+
+
+class OrderFillIn(BaseModel):
+    """Single call to set all video slots from a flat character slug list.
+    One item is created per slug, up to plan.video_count.
+    """
+    character_slugs: list[str] = Field(..., min_length=1, max_length=20)
     custom_message: str | None = Field(None, max_length=400)
 
 
 class OrderItemUpdate(BaseModel):
-    character_ids: list[int] | None = Field(None, min_length=1, max_length=4)
+    character_ids: list[str] | None = Field(None, min_length=1, max_length=4)
     custom_message: str | None = Field(None, max_length=400)
 
 
@@ -104,7 +112,7 @@ class OrderItemOut(BaseModel):
 
     id: int
     sequence: int
-    character_ids: list[int]
+    character_ids: list[str]
     custom_message: str | None
     status: OrderItemStatus
     video_url: str | None = None

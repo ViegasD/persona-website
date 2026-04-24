@@ -24,6 +24,7 @@ from app.db.session import get_session
 from app.schemas.v1 import (
     OrderCheckoutOut,
     OrderCreate,
+    OrderFillIn,
     OrderItemCreate,
     OrderItemOut,
     OrderItemUpdate,
@@ -263,6 +264,47 @@ async def delete_item(
         it.sequence = idx
     await session.commit()
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.post("/{order_id}/fill", response_model=OrderOut)
+async def fill_items(
+    order_id: int,
+    payload: OrderFillIn,
+    user_id: int | None = Depends(get_current_user_id),
+    guest_order_id: int | None = Depends(get_guest_order_id),
+    session: AsyncSession = Depends(get_session),
+) -> OrderOut:
+    """Replace all items with one item per character slug (up to plan.video_count).
+    
+    The frontend sends a flat list of character slugs (one per desired video).
+    This endpoint clears existing DRAFT items and re-creates them so a single
+    call is sufficient regardless of how many videos the plan includes.
+    """
+    order = await _load_order(session, order_id, user_id=user_id, guest_order_id=guest_order_id)
+    _ensure_draft(order)
+
+    slugs = payload.character_slugs[: order.plan.video_count]
+    if not slugs:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, detail="at least one character slug required")
+
+    # Clear existing items
+    for item in list(order.items):
+        await session.delete(item)
+    await session.flush()
+
+    for seq, slug in enumerate(slugs, start=1):
+        session.add(
+            OrderItem(
+                order_id=order.id,
+                sequence=seq,
+                character_ids=[slug],
+                custom_message=payload.custom_message,
+            )
+        )
+
+    await session.commit()
+    await session.refresh(order, attribute_names=["items", "plan"])
+    return _to_out(order)
 
 
 @router.post("/{order_id}/checkout", response_model=OrderCheckoutOut)

@@ -109,7 +109,7 @@ CREATE TABLE IF NOT EXISTS web.order_item (
   id                         BIGSERIAL PRIMARY KEY,
   order_id                   BIGINT NOT NULL REFERENCES web."order"(id) ON DELETE CASCADE,
   sequence                   INTEGER NOT NULL,
-  character_ids              INTEGER[] NOT NULL,
+  character_ids              TEXT[] NOT NULL,
   custom_message             TEXT,
   resolved_script            TEXT,
   composite_image_s3_key     VARCHAR(512),
@@ -219,7 +219,7 @@ CREATE INDEX IF NOT EXISTS ix_upsell_event_order_id ON web.upsell_event (order_i
 CREATE TABLE IF NOT EXISTS web.composite_cache (
   sha           VARCHAR(64) PRIMARY KEY,
   s3_key        VARCHAR(512) NOT NULL,
-  character_ids INTEGER[] NOT NULL,
+  character_ids TEXT[] NOT NULL,
   payload       JSONB,
   created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );

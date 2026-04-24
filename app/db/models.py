@@ -214,7 +214,7 @@ class OrderItem(Base):
     sequence: Mapped[int] = mapped_column(Integer, nullable=False)
 
     # Character ids reference the existing public.character table (Node backend).
-    character_ids: Mapped[list[int]] = mapped_column(ARRAY(Integer), nullable=False)
+    character_ids: Mapped[list[str]] = mapped_column(ARRAY(Text), nullable=False)
     custom_message: Mapped[str | None] = mapped_column(Text)
     resolved_script: Mapped[str | None] = mapped_column(Text)
 
@@ -397,7 +397,7 @@ class CompositeFrameCache(Base):
 
     sha: Mapped[str] = mapped_column(String(64), primary_key=True)
     s3_key: Mapped[str] = mapped_column(String(512), nullable=False)
-    character_ids: Mapped[list[int]] = mapped_column(ARRAY(Integer), nullable=False)
+    character_ids: Mapped[list[str]] = mapped_column(ARRAY(Text), nullable=False)
     payload: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False

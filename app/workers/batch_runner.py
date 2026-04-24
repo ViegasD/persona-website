@@ -59,7 +59,7 @@ from app.workers.queue import redis_settings
 
 
 def composite_cache_key(
-    character_ids: list[int], recipient_name: str | None, occasion_slug: str | None
+    character_ids: list[str], recipient_name: str | None, occasion_slug: str | None
 ) -> str:
     payload = json.dumps(
         {
@@ -72,32 +72,32 @@ def composite_cache_key(
     return hashlib.sha256(payload.encode()).hexdigest()
 
 
-async def _load_characters(character_ids: list[int]) -> list[dict[str, Any]]:
+async def _load_characters(character_slugs: list[str]) -> list[dict[str, Any]]:
     """Fetch ``{id, name, descriptor, reference_url}`` from ``web.character_v``."""
     async with session_scope() as session:
         rows = (
             await session.execute(
                 text(
-                    'SELECT id, name, description, "thumbnailS3Key" '
-                    "FROM web.character_v WHERE id = ANY(:ids)"
+                    'SELECT slug, name, description, "thumbnailS3Key" '
+                    "FROM web.character_v WHERE slug = ANY(:slugs)"
                 ),
-                {"ids": character_ids},
+                {"slugs": character_slugs},
             )
         ).all()
-    by_id = {r[0]: r for r in rows}
+    by_slug = {r[0]: r for r in rows}
     out: list[dict[str, Any]] = []
-    for cid in character_ids:
-        row = by_id.get(cid)
+    for slug in character_slugs:
+        row = by_slug.get(slug)
         if row is None:
-            raise RuntimeError(f"character {cid} not found in catalog view")
+            raise RuntimeError(f"character '{slug}' not found in catalog view")
         thumb_key = row[3]
         url = storage.presigned_get_url(thumb_key, expires_in=6 * 3600) if thumb_key else None
         if not url:
-            raise RuntimeError(f"character {cid} has no reference image")
+            raise RuntimeError(f"character '{slug}' has no reference image")
         out.append(
             {
-                "id": cid,
-                "name": row[1] or f"Personagem {cid}",
+                "id": slug,
+                "name": row[1] or slug,
                 "descriptor": (row[2] or "").strip(),
                 "reference_url": url,
             }
