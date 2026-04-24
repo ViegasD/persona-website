@@ -58,7 +58,7 @@ async def create_pix_payment(
     }
 
     def _create() -> dict[str, Any]:
-        return _sdk().payment().create({"body": body})
+        return _sdk().payment().create(body)
 
     response = await asyncio.to_thread(_create)
     http_status = response.get("status")
