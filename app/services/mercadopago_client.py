@@ -54,7 +54,7 @@ async def create_pix_payment(
         "external_reference": make_external_reference(order_id),
         "notification_url": notification_url,
         "payer": {"email": payer_email or "cliente@persona.com.br"},
-        "date_of_expiration": expires_at.strftime("%Y-%m-%dT%H:%M:%S+00:00"),
+        "date_of_expiration": expires_at.strftime("%Y-%m-%dT%H:%M:%S.000-03:00"),
     }
 
     def _create() -> dict[str, Any]:
