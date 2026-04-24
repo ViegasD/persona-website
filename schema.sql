@@ -256,3 +256,17 @@ BEGIN
     EXECUTE 'CREATE OR REPLACE VIEW web.style_template_v AS SELECT * FROM public."StyleTemplate"';
   END IF;
 END $$;
+
+-- ── Seed: plans ───────────────────────────────────────────────────────────────
+-- Insert default plans idempotently. Existing rows (matched by slug) are not overwritten.
+INSERT INTO web.plan (slug, name, description, price_cents, video_count, max_characters_per_video, personalization_level, is_active, sort_order, features)
+VALUES
+  ('teste',        'Plano Teste',           '1 vídeo com personagem aleatório',      1990, 1, 1, 'medium', TRUE, 1,
+   ARRAY['1 vídeo personalizado', 'Personagem surpresa', 'Entrega em até 24h']),
+  ('surpresa',     'Plano Surpresa',        '3 vídeos com personagens à escolha',    2990, 3, 2, 'medium', TRUE, 2,
+   ARRAY['3 vídeos personalizados', 'Escolha os personagens', 'Até 2 personagens por vídeo', 'Entrega em até 24h']),
+  ('completo',     'Plano Completo',        '5 vídeos com personagens à escolha',    4990, 5, 4, 'full',   TRUE, 3,
+   ARRAY['5 vídeos personalizados', 'Escolha os personagens', 'Até 4 personagens por vídeo', 'Mensagem personalizada', 'Entrega em até 24h']),
+  ('aniversario',  'Vídeo de Aniversário',  '1 vídeo especial temático de aniversário', 3490, 1, 2, 'full', TRUE, 4,
+   ARRAY['1 vídeo especial', 'Tema aniversário', 'Até 2 personagens', 'Mensagem personalizada', 'Entrega em até 24h'])
+ON CONFLICT (slug) DO NOTHING;

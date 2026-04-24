@@ -112,7 +112,7 @@ class OrderItemOut(BaseModel):
 
 
 class OrderCreate(BaseModel):
-    plan_id: int
+    plan_id: str  # plan slug, e.g. "teste", "surpresa", "completo"
     recipient_name: str | None = Field(None, max_length=128)
     recipient_age: str | None = Field(None, max_length=16)
     occasion_slug: str | None = Field(None, max_length=64)
@@ -150,6 +150,7 @@ class OrderCheckoutOut(BaseModel):
     order_id: int
     payment_id: int
     qr_code_payload: str
+    qr_code_base64: str | None = None  # inline PNG as base64; use as <img src="data:image/png;base64,...">
     qr_code_url: str
     ticket_url: str | None
     expires_at: datetime | None

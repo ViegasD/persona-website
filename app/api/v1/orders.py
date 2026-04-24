@@ -117,7 +117,7 @@ async def create_order(
     user_id: int | None = Depends(get_current_user_id),
     session: AsyncSession = Depends(get_session),
 ) -> OrderOut:
-    plan = (await session.execute(select(Plan).where(Plan.id == payload.plan_id))).scalar_one_or_none()
+    plan = (await session.execute(select(Plan).where(Plan.slug == payload.plan_id))).scalar_one_or_none()
     if plan is None or not plan.is_active:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="plan not found or inactive")
 
@@ -296,6 +296,7 @@ async def checkout(
             order_id=order.id,
             payment_id=existing.id,
             qr_code_payload=existing.qr_code_payload,
+            qr_code_base64=None,
             qr_code_url=storage.presigned_get_url(cast(str, existing.qr_code_s3_key), 1800)
             if existing.qr_code_s3_key
             else "",
@@ -337,6 +338,7 @@ async def checkout(
         order_id=order.id,
         payment_id=payment.id,
         qr_code_payload=pix["qr_code"],
+        qr_code_base64=pix["qr_code_base64"] or None,
         qr_code_url=storage.presigned_get_url(qr_key, 1800),
         ticket_url=pix["ticket_url"] or None,
         expires_at=pix["expires_at"],
