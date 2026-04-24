@@ -31,16 +31,22 @@ def create_app() -> FastAPI:
         redoc_url=None,
     )
     if settings.env == "development":
-        cors_origins: list[str] = ["*"]
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origin_regex=".*",
+            allow_credentials=True,
+            allow_methods=["*"],
+            allow_headers=["*"],
+        )
     else:
         cors_origins = [o.strip().rstrip("/") for o in settings.web_base_url.split(",") if o.strip()]
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=cors_origins,
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=cors_origins,
+            allow_credentials=True,
+            allow_methods=["*"],
+            allow_headers=["*"],
+        )
 
     app.include_router(v1_router)
 
