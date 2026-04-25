@@ -143,8 +143,8 @@ async def create_order(
             GUEST_COOKIE_NAME,
             token,
             httponly=True,
-            samesite="lax",
-            secure=get_settings().env != "development",
+            samesite="none",
+            secure=True,
             max_age=60 * 60 * 24 * 30,
         )
 
