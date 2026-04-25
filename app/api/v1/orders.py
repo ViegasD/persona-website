@@ -78,6 +78,7 @@ def _to_out(order: Order, *, guest_token: str | None = None) -> OrderOut:
         guest_email=order.guest_email,
         guest_phone=order.guest_phone,
         total_cents=order.total_cents,
+        quality=order.quality,
         items=[_item_to_out(i) for i in sorted(order.items, key=lambda x: x.sequence)],
         created_at=order.created_at,
         paid_at=order.paid_at,
@@ -205,7 +206,7 @@ async def create_order(
         )
 
     await session.commit()
-    await session.refresh(order, attribute_names=["items", "plan"])
+    await session.refresh(order, attribute_names=["items", "plan", "quality"])
     # guest_token is also returned in the response body so the frontend can
     # pass it back as X-Guest-Token on fill/checkout — avoids third-party
     # cookie issues when the storefront HTML is on a different origin.
