@@ -93,6 +93,7 @@ async def _load_characters(character_slugs: list[str]) -> list[dict[str, Any]]:
                 "name": row[1] or slug,
                 "descriptor": (row[2] or "").strip(),
                 "reference_url": url,
+                "s3_key": thumb_key,
             }
         )
     return out
@@ -134,9 +135,11 @@ async def _resolve_composite_url(
         "Keep each character's appearance, outfit, colors and proportions exactly as in their reference image. "
         "Full body or three-quarter framing. No text, no captions, no logos. Vertical 9:16 composition."
     )
+    # KIE image_input requires public HTTP URLs, not data URIs.
+    kie_image_urls = [storage.presigned_get_url(c["s3_key"], expires_in=3600) for c in chars]
     task_id = await kie_client.create_composite_task(
         prompt=composite_prompt,
-        image_urls=[c["reference_url"] for c in chars],
+        image_urls=kie_image_urls,
         image_size="9:16",
         output_format="PNG",
     )
