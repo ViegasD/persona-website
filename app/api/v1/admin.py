@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.api.deps import require_admin_key
+from app.core.security import sign_media_token
 from app.db.models import (
     Batch,
     BatchStatus,
@@ -171,8 +172,12 @@ async def list_pending_approval(
     for item in items:
         order = item.order
         is_multi = len(item.character_ids) > 1
-        has_preview = (is_multi and item.composite_image_s3_key) or (not is_multi and item.video_s3_key)
-        preview_url = f"{api_base}/api/v1/admin/items/{item.id}/preview" if has_preview else None
+        has_preview = bool(item.video_s3_key or item.composite_image_s3_key)
+        if has_preview:
+            token = sign_media_token(item.id)
+            preview_url = f"{api_base}/api/v1/media/{token}"
+        else:
+            preview_url = None
 
         result.append({
             "item_id": item.id,
