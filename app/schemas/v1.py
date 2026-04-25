@@ -95,11 +95,12 @@ class OrderItemCreate(BaseModel):
 
 
 class OrderFillIn(BaseModel):
-    """Single call to set all video slots from a flat character slug list.
-    One item is created per slug, up to plan.video_count.
+    """Single call to set all video slots.
+    Each inner list is a video slot; each string is a character slug.
     """
-    character_slugs: list[str] = Field(..., min_length=1, max_length=20)
+    video_slots: list[list[str]] = Field(..., min_length=1, max_length=20)
     custom_message: str | None = Field(None, max_length=400)
+    quality: Literal["sd", "hd"] = "sd"
 
 
 class OrderItemUpdate(BaseModel):
@@ -148,6 +149,7 @@ class OrderOut(BaseModel):
     guest_email: str | None
     guest_phone: str | None
     total_cents: int
+    quality: str
     items: list[OrderItemOut]
     created_at: datetime
     paid_at: datetime | None

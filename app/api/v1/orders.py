@@ -344,21 +344,39 @@ async def fill_items(
     order = await _load_order(session, order_id, user_id=user_id, guest_order_ids=guest_order_ids, guest_token=x_guest_token)
     _ensure_draft(order)
 
-    slugs = payload.character_slugs[: order.plan.video_count]
-    if not slugs:
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, detail="at least one character slug required")
+    slots = payload.video_slots[: order.plan.video_count]
+    if len(slots) != order.plan.video_count:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"expected {order.plan.video_count} video slot(s)",
+        )
+    for slot in slots:
+        if len(slot) == 0 or len(slot) > order.plan.max_characters_per_video:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=f"each slot needs 1–{order.plan.max_characters_per_video} character(s)",
+            )
+
+    # Pricing: base + 20% for HD + 10% per extra character (beyond first) per slot
+    base = order.plan.price_cents
+    total_extra_chars = sum(max(0, len(s) - 1) for s in slots)
+    total_cents = round(
+        base * (1 + (0.20 if payload.quality == "hd" else 0) + 0.10 * total_extra_chars)
+    )
+    order.total_cents = total_cents
+    order.quality = payload.quality
 
     # Clear existing items
     for item in list(order.items):
         await session.delete(item)
     await session.flush()
 
-    for seq, slug in enumerate(slugs, start=1):
+    for seq, slot in enumerate(slots, start=1):
         session.add(
             OrderItem(
                 order_id=order.id,
                 sequence=seq,
-                character_ids=[slug],
+                character_ids=list(slot),
                 custom_message=payload.custom_message,
             )
         )

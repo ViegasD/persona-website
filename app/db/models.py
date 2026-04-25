@@ -184,6 +184,7 @@ class Order(Base):
     recipient_age: Mapped[str | None] = mapped_column(String(16))
     occasion_slug: Mapped[str | None] = mapped_column(String(64), index=True)
     total_cents: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    quality: Mapped[str] = mapped_column(String(8), default="sd", nullable=False, server_default="sd")
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False, index=True

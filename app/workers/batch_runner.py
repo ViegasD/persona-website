@@ -177,6 +177,7 @@ async def _generate_video_for_item(item_id: int) -> None:
         recipient_name = order.recipient_name
         recipient_age = order.recipient_age
         occasion_slug = order.occasion_slug
+        quality = order.quality
 
     chars = await _load_characters(char_ids)
 
@@ -203,6 +204,7 @@ async def _generate_video_for_item(item_id: int) -> None:
         recipient_age=recipient_age,
         occasion_slug=occasion_slug,
         custom_message=custom_message,
+        quality=quality,
     )
 
     async with session_scope() as session:
@@ -353,6 +355,7 @@ async def process_item_phase1(ctx: dict[str, Any], item_id: int) -> None:  # noq
             recipient_name = order.recipient_name
             recipient_age = order.recipient_age
             occasion_slug = order.occasion_slug
+            quality = order.quality
             is_multi = len(char_ids) > 1
 
         chars = await _load_characters(char_ids)
@@ -387,6 +390,7 @@ async def process_item_phase1(ctx: dict[str, Any], item_id: int) -> None:  # noq
                 recipient_age=recipient_age,
                 occasion_slug=occasion_slug,
                 custom_message=custom_message,
+                quality=quality,
             )
             async with session_scope() as session:
                 item = (
@@ -433,6 +437,7 @@ async def generate_video_for_approved_item(ctx: dict[str, Any], item_id: int) ->
             recipient_name = order.recipient_name
             recipient_age = order.recipient_age
             occasion_slug = order.occasion_slug
+            quality = order.quality
 
         if not has_video:
             # Multi-char: composite exists, need to generate video now
@@ -457,6 +462,7 @@ async def generate_video_for_approved_item(ctx: dict[str, Any], item_id: int) ->
                 recipient_age=recipient_age,
                 occasion_slug=occasion_slug,
                 custom_message=custom_message,
+                quality=quality,
             )
 
         async with session_scope() as session:
@@ -508,6 +514,7 @@ async def _generate_and_store_video(
     recipient_age: str | None,
     occasion_slug: str | None,
     custom_message: str | None,
+    quality: str = "sd",
 ) -> None:
     """Generate video via xAI Grok and store in S3, updating the OrderItem row."""
     settings = get_settings()
@@ -557,7 +564,7 @@ async def _generate_and_store_video(
         image_url=input_image_url,
         duration=settings.xai_video_duration_seconds,
         aspect_ratio=settings.xai_video_aspect_ratio,
-        resolution=settings.xai_video_resolution,
+        resolution="1080p" if quality == "hd" else "720p",
     )
     result = await xai_client.wait_for_video(request_id)
     video_info = result.get("video") or {}
