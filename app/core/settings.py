@@ -51,7 +51,7 @@ class Settings(BaseSettings):
     kie_api_key: str | None = Field(None, alias="KIE_API_KEY")
     kie_api_base: str = Field("https://api.kie.ai/api/v1", alias="KIE_API_BASE")
     kie_nano_banana_model: str = Field(
-        "google/nano-banana-pro", alias="KIE_NANO_BANANA_MODEL"
+        "nano-banana-2", alias="KIE_NANO_BANANA_MODEL"
     )
     kie_callback_url: str | None = Field(None, alias="KIE_CALLBACK_URL")
 

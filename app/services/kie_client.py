@@ -38,14 +38,14 @@ async def create_composite_task(
 ) -> str:
     """Submit a nano-banana-pro composite task and return ``taskId``."""
     s = get_settings()
-    url = f"{s.kie_api_base.rstrip('/')}/playground/createTask"
+    url = f"{s.kie_api_base.rstrip('/')}/jobs/createTask"
     body: dict[str, Any] = {
         "model": s.kie_nano_banana_model,
         "input": {
             "prompt": prompt,
-            "image_urls": image_urls,
-            "image_size": image_size,
-            "output_format": output_format,
+            "image_input": image_urls,
+            "aspect_ratio": image_size,
+            "output_format": output_format.lower(),
         },
     }
     if s.kie_callback_url:
@@ -65,7 +65,7 @@ async def create_composite_task(
 
 async def get_task(task_id: str) -> dict[str, Any]:
     s = get_settings()
-    url = f"{s.kie_api_base.rstrip('/')}/playground/recordInfo"
+    url = f"{s.kie_api_base.rstrip('/')}/jobs/recordInfo"
     async with httpx.AsyncClient(timeout=60) as client:
         resp = await client.get(url, params={"taskId": task_id}, headers=_headers())
         resp.raise_for_status()
