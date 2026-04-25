@@ -582,6 +582,10 @@ class WorkerSettings:
     functions = [run_batch, collector_check, process_item_phase1, generate_video_for_approved_item]
     redis_settings = redis_settings()
     cron_jobs: list = []
-    on_startup = staticmethod(lambda ctx: configure_logging())  # type: ignore[arg-type]
+
+    @staticmethod
+    async def on_startup(ctx: dict) -> None:  # noqa: ARG004
+        configure_logging()
+
     job_timeout = 60 * 60
     keep_result = 60 * 60
