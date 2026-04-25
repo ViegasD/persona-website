@@ -9,9 +9,10 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.settings import get_settings
-from app.db.models import Order, OrderStatus, Payment, PaymentStatus
+from app.db.models import Order, OrderItem, OrderStatus, Payment, PaymentStatus
 from app.db.session import get_session
-from app.services import batch_collector, mercadopago_client
+from app.services import mercadopago_client
+from app.workers.queue import enqueue_process_item
 
 router = APIRouter(prefix="/payments", tags=["payments"])
 
@@ -73,8 +74,17 @@ async def mercadopago_webhook(
         if order is not None and order.status in {OrderStatus.AWAITING_PAYMENT, OrderStatus.DRAFT}:
             order.status = OrderStatus.PAID
             order.paid_at = datetime.now(UTC)
-            # Attach to the open batch immediately.
-            await batch_collector.attach_paid_order(session, order.id)
+            await session.flush()
+            # Enqueue per-item phase-1 processing immediately (no batch waiting).
+            item_ids = (
+                await session.execute(
+                    select(OrderItem.id).where(OrderItem.order_id == order.id)
+                )
+            ).scalars().all()
+            await session.commit()
+            for item_id in item_ids:
+                await enqueue_process_item(item_id)
+            return {"received": True}
 
     elif details.get("status") in {"rejected", "cancelled"}:
         payment.status = PaymentStatus.REJECTED

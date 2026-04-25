@@ -1,25 +1,17 @@
-"""arq worker that runs a batch of cameo orders end-to-end.
+"""arq worker that runs cameo order processing.
 
-Pipeline per item:
+New per-item pipeline (two-phase with admin approval):
 
-1. Resolve character metadata (name + visual descriptor + reference image)
-   from the Node-backend ``character_v`` view.
-2. If multiple characters → call **kie.ai nano-banana-pro** to combine the
-   reference images into a single composite "stage" frame. The result is
-   keyed by SHA-256(sorted character ids + recipient + occasion) and cached
-   in ``CompositeFrameCache`` so identical jobs reuse the same composite.
-3. Generate the structured per-character + group lines via
-   ``script_writer.generate_structured_script``.
-4. Build the strict Grok prompt via ``prompt_builder.build_video_prompt``.
-5. Submit image-to-video to **xAI Grok Imagine** with the composite (or the
-   single character thumbnail) as the starting frame.
-6. Download the resulting MP4, upload to S3, mark item READY.
-7. When all items in the order are READY → mark order READY → enqueue
-   delivery (account + WhatsApp).
+Phase 1 — triggered immediately on payment:
+  • Multi-character item: generate composite image via kie.ai → AWAITING_APPROVAL
+  • Single-character item: generate video via xAI Grok → AWAITING_APPROVAL
 
-There is no pod to start/stop anymore — both providers are pay-per-call
-HTTP APIs, so the batch is just a fan-out of HTTP jobs with bounded
-concurrency.
+Phase 2 — triggered by admin approval:
+  • Multi-character item (has composite, no video): generate video → READY → deliver
+  • Single-character item (already has video): mark READY → deliver
+
+Legacy batch mode (run_batch / collector_check) is kept for manual use but
+is no longer triggered automatically on new payments.
 """
 
 from __future__ import annotations
@@ -162,17 +154,17 @@ async def _resolve_composite_url(
     return storage.presigned_get_url(s3_key, expires_in=6 * 3600), s3_key
 
 
-# ─────────────────────────── per-item task ────────────────────────────────
+# ─────────────────────────── per-item task (legacy batch) ─────────────────
 
 
 async def _generate_video_for_item(item_id: int) -> None:
-    settings = get_settings()
+    """Used by the legacy run_batch path. Generates composite + video end-to-end → READY."""
     async with session_scope() as session:
         item: OrderItem = (
             await session.execute(
                 select(OrderItem)
                 .where(OrderItem.id == item_id)
-                .options(selectinload(OrderItem.order).selectinload(Order.items))
+                .options(selectinload(OrderItem.order))
             )
         ).scalar_one()
         order: Order = item.order
@@ -187,10 +179,8 @@ async def _generate_video_for_item(item_id: int) -> None:
 
     chars = await _load_characters(char_ids)
 
-    # 1) composite (or single ref image)
     input_image_url, composite_key = await _resolve_composite_url(
-        item,
-        chars,
+        item, chars,
         recipient_name=recipient_name,
         occasion_slug=occasion_slug,
     )
@@ -204,65 +194,20 @@ async def _generate_video_for_item(item_id: int) -> None:
         item.status = OrderItemStatus.RENDERING
         await session.commit()
 
-    # 2) structured script
-    script = await script_writer.generate_structured_script(
-        characters=[
-            script_writer.CharacterSpec(
-                id=c["id"], name=c["name"], descriptor=c["descriptor"]
-            )
-            for c in chars
-        ],
-        recipient_name=recipient_name or "amiguinho",
+    await _generate_and_store_video(
+        item_id=item_id,
+        chars=chars,
+        input_image_url=input_image_url,
+        recipient_name=recipient_name,
         recipient_age=recipient_age,
         occasion_slug=occasion_slug,
-        user_message=custom_message,
+        custom_message=custom_message,
     )
-
-    # 3) full Grok prompt with strict locked-camera template
-    scene_description = (
-        f"{len(chars)} stylized 3D animated character"
-        + ("s" if len(chars) > 1 else "")
-        + " standing side by side on a vibrant, kid-friendly stage with warm lighting"
-    )
-    prompt_text = build_video_prompt(
-        VideoPromptInputs(
-            scene_description=scene_description,
-            characters=[
-                CharacterLine(descriptor=chars[i]["descriptor"], line_pt=script.character_lines[i])
-                for i in range(len(chars))
-            ],
-            group_line_pt=script.group_line,
-            duration_seconds=settings.xai_video_duration_seconds,
-        )
-    )
-
-    # 4) submit image-to-video via xAI
-    request_id = await xai_client.start_image_to_video(
-        prompt=prompt_text,
-        image_url=input_image_url,
-        duration=settings.xai_video_duration_seconds,
-        aspect_ratio=settings.xai_video_aspect_ratio,
-        resolution=settings.xai_video_resolution,
-    )
-    result = await xai_client.wait_for_video(request_id)
-    video_info = result.get("video") or {}
-    video_url = video_info.get("url")
-    if not video_url:
-        raise RuntimeError(f"xAI returned no video url: {result}")
-
-    raw = await xai_client.download_video(video_url)
-    video_key = storage.storefront_key(
-        "orders", str(item.order_id), f"video-{item.sequence}.mp4"
-    )
-    storage.upload_bytes(video_key, raw, content_type="video/mp4")
 
     async with session_scope() as session:
         item = (
             await session.execute(select(OrderItem).where(OrderItem.id == item_id))
         ).scalar_one()
-        item.comfy_workflow_b_prompt_id = request_id  # repurposed: xAI request id
-        item.resolved_script = prompt_text
-        item.video_s3_key = video_key
         item.status = OrderItemStatus.READY
         await session.commit()
 
@@ -378,11 +323,263 @@ async def collector_check(ctx: dict[str, Any]) -> None:  # noqa: ARG001
     await enqueue_run_batch(batch_id)
 
 
+# ─────────────────── Phase-1: process immediately on payment ──────────────
+
+
+async def process_item_phase1(ctx: dict[str, Any], item_id: int) -> None:  # noqa: ARG001
+    """Phase 1 — runs right after payment is confirmed.
+
+    • Multi-char: generate composite image via kie.ai → AWAITING_APPROVAL
+    • Single-char: generate video via xAI → AWAITING_APPROVAL
+
+    In both cases the admin must approve before delivery happens.
+    """
+    try:
+        async with session_scope() as session:
+            item: OrderItem = (
+                await session.execute(
+                    select(OrderItem)
+                    .where(OrderItem.id == item_id)
+                    .options(selectinload(OrderItem.order))
+                )
+            ).scalar_one()
+            order: Order = item.order
+            item.attempts += 1
+            item.status = OrderItemStatus.COMPOSITING
+            await session.commit()
+            char_ids = list(item.character_ids)
+            custom_message = item.custom_message
+            recipient_name = order.recipient_name
+            recipient_age = order.recipient_age
+            occasion_slug = order.occasion_slug
+            is_multi = len(char_ids) > 1
+
+        chars = await _load_characters(char_ids)
+
+        if is_multi:
+            # ── Multi-character: generate composite image only ──────────────
+            _input_url, composite_key = await _resolve_composite_url(
+                item, chars,
+                recipient_name=recipient_name,
+                occasion_slug=occasion_slug,
+            )
+            async with session_scope() as session:
+                item = (
+                    await session.execute(select(OrderItem).where(OrderItem.id == item_id))
+                ).scalar_one()
+                if composite_key:
+                    item.composite_image_s3_key = composite_key
+                item.status = OrderItemStatus.AWAITING_APPROVAL
+                await session.commit()
+        else:
+            # ── Single-character: generate video directly ───────────────────
+            input_image_url, _composite_key = await _resolve_composite_url(
+                item, chars,
+                recipient_name=recipient_name,
+                occasion_slug=occasion_slug,
+            )
+            await _generate_and_store_video(
+                item_id=item_id,
+                chars=chars,
+                input_image_url=input_image_url,
+                recipient_name=recipient_name,
+                recipient_age=recipient_age,
+                occasion_slug=occasion_slug,
+                custom_message=custom_message,
+            )
+            async with session_scope() as session:
+                item = (
+                    await session.execute(select(OrderItem).where(OrderItem.id == item_id))
+                ).scalar_one()
+                item.status = OrderItemStatus.AWAITING_APPROVAL
+                await session.commit()
+
+    except Exception as exc:  # noqa: BLE001
+        async with session_scope() as session:
+            item = (
+                await session.execute(select(OrderItem).where(OrderItem.id == item_id))
+            ).scalar_one_or_none()
+            if item is not None:
+                item.status = OrderItemStatus.FAILED
+                item.error = str(exc)[:500]
+                await session.commit()
+        raise
+
+
+# ─────────────────── Phase-2: generate video after admin approves ─────────
+
+
+async def generate_video_for_approved_item(ctx: dict[str, Any], item_id: int) -> None:  # noqa: ARG001
+    """Phase 2 — triggered by admin approval.
+
+    • Multi-char (has composite, no video): generate video → READY → deliver if order complete
+    • Single-char (already has video from phase 1): just mark READY → deliver if order complete
+    """
+    try:
+        async with session_scope() as session:
+            item: OrderItem = (
+                await session.execute(
+                    select(OrderItem)
+                    .where(OrderItem.id == item_id)
+                    .options(selectinload(OrderItem.order))
+                )
+            ).scalar_one()
+            order: Order = item.order
+            char_ids = list(item.character_ids)
+            composite_key = item.composite_image_s3_key
+            has_video = bool(item.video_s3_key)
+            custom_message = item.custom_message
+            recipient_name = order.recipient_name
+            recipient_age = order.recipient_age
+            occasion_slug = order.occasion_slug
+
+        if not has_video:
+            # Multi-char: composite exists, need to generate video now
+            chars = await _load_characters(char_ids)
+            input_image_url = (
+                storage.presigned_get_url(composite_key, expires_in=6 * 3600)
+                if composite_key
+                else (await _resolve_composite_url(item, chars, recipient_name=recipient_name, occasion_slug=occasion_slug))[0]
+            )
+            async with session_scope() as session:
+                item = (
+                    await session.execute(select(OrderItem).where(OrderItem.id == item_id))
+                ).scalar_one()
+                item.status = OrderItemStatus.RENDERING
+                await session.commit()
+
+            await _generate_and_store_video(
+                item_id=item_id,
+                chars=chars,
+                input_image_url=input_image_url,
+                recipient_name=recipient_name,
+                recipient_age=recipient_age,
+                occasion_slug=occasion_slug,
+                custom_message=custom_message,
+            )
+
+        async with session_scope() as session:
+            item = (
+                await session.execute(
+                    select(OrderItem)
+                    .where(OrderItem.id == item_id)
+                    .options(selectinload(OrderItem.order).selectinload(Order.items))
+                )
+            ).scalar_one()
+            item.status = OrderItemStatus.READY
+            await session.commit()
+
+            order = (
+                await session.execute(
+                    select(Order)
+                    .where(Order.id == item.order_id)
+                    .options(selectinload(Order.items))
+                )
+            ).scalar_one()
+            if all(it.status == OrderItemStatus.READY for it in order.items):
+                order.status = OrderStatus.READY
+                order.generated_at = datetime.now(UTC)
+                await session.commit()
+                await delivery.deliver_order(session, order.id)
+                await session.commit()
+
+    except Exception as exc:  # noqa: BLE001
+        async with session_scope() as session:
+            item = (
+                await session.execute(select(OrderItem).where(OrderItem.id == item_id))
+            ).scalar_one_or_none()
+            if item is not None:
+                item.status = OrderItemStatus.FAILED
+                item.error = str(exc)[:500]
+                await session.commit()
+        raise
+
+
+# ─────────────────────────── shared video helper ──────────────────────────
+
+
+async def _generate_and_store_video(
+    *,
+    item_id: int,
+    chars: list[dict[str, Any]],
+    input_image_url: str,
+    recipient_name: str | None,
+    recipient_age: str | None,
+    occasion_slug: str | None,
+    custom_message: str | None,
+) -> None:
+    """Generate video via xAI Grok and store in S3, updating the OrderItem row."""
+    settings = get_settings()
+
+    script = await script_writer.generate_structured_script(
+        characters=[
+            script_writer.CharacterSpec(
+                id=c["id"], name=c["name"], descriptor=c["descriptor"]
+            )
+            for c in chars
+        ],
+        recipient_name=recipient_name or "amiguinho",
+        recipient_age=recipient_age,
+        occasion_slug=occasion_slug,
+        user_message=custom_message,
+    )
+
+    scene_description = (
+        f"{len(chars)} stylized 3D animated character"
+        + ("s" if len(chars) > 1 else "")
+        + " standing side by side on a vibrant, kid-friendly stage with warm lighting"
+    )
+    prompt_text = build_video_prompt(
+        VideoPromptInputs(
+            scene_description=scene_description,
+            characters=[
+                CharacterLine(descriptor=chars[i]["descriptor"], line_pt=script.character_lines[i])
+                for i in range(len(chars))
+            ],
+            group_line_pt=script.group_line,
+            duration_seconds=settings.xai_video_duration_seconds,
+        )
+    )
+
+    request_id = await xai_client.start_image_to_video(
+        prompt=prompt_text,
+        image_url=input_image_url,
+        duration=settings.xai_video_duration_seconds,
+        aspect_ratio=settings.xai_video_aspect_ratio,
+        resolution=settings.xai_video_resolution,
+    )
+    result = await xai_client.wait_for_video(request_id)
+    video_info = result.get("video") or {}
+    video_url = video_info.get("url")
+    if not video_url:
+        raise RuntimeError(f"xAI returned no video url: {result}")
+
+    async with session_scope() as session:
+        item = (
+            await session.execute(select(OrderItem).where(OrderItem.id == item_id))
+        ).scalar_one()
+        order_id = item.order_id
+        sequence = item.sequence
+
+    raw = await xai_client.download_video(video_url)
+    video_key = storage.storefront_key("orders", str(order_id), f"video-{sequence}.mp4")
+    storage.upload_bytes(video_key, raw, content_type="video/mp4")
+
+    async with session_scope() as session:
+        item = (
+            await session.execute(select(OrderItem).where(OrderItem.id == item_id))
+        ).scalar_one()
+        item.comfy_workflow_b_prompt_id = request_id  # repurposed: xAI request id
+        item.resolved_script = prompt_text
+        item.video_s3_key = video_key
+        await session.commit()
+
+
 # ─────────────────────────── arq settings ─────────────────────────────────
 
 
 class WorkerSettings:
-    functions = [run_batch, collector_check]
+    functions = [run_batch, collector_check, process_item_phase1, generate_video_for_approved_item]
     redis_settings = redis_settings()
     cron_jobs: list = []
     on_startup = staticmethod(lambda ctx: configure_logging())  # type: ignore[arg-type]

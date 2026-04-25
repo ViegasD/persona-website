@@ -15,6 +15,8 @@ from app.db.models import (
     BatchStatus,
     BatchTrigger,
     Order,
+    OrderItem,
+    OrderItemStatus,
     OrderStatus,
     Payment,
     PaymentStatus,
@@ -22,7 +24,7 @@ from app.db.models import (
 )
 from app.db.session import get_session
 from app.schemas.v1 import OrderOut, PlanCreate, PlanOut, PlanUpdate
-from app.services import batch_collector
+from app.services import batch_collector, storage
 
 router = APIRouter(prefix="/admin", tags=["admin"], dependencies=[Depends(require_admin_key)])
 
@@ -125,14 +127,130 @@ async def approve_order(order_id: int, session: AsyncSession = Depends(get_sessi
         payment.status = PaymentStatus.APPROVED
         payment.paid_at = now
 
-    if order.status not in {OrderStatus.PAID, OrderStatus.QUEUED, OrderStatus.RENDERING, OrderStatus.READY, OrderStatus.DELIVERED}:
+    if order.status not in {OrderStatus.PAID, OrderStatus.GENERATING, OrderStatus.READY, OrderStatus.DELIVERED}:
         order.status = OrderStatus.PAID
         order.paid_at = now
         await session.flush()
-        await batch_collector.attach_paid_order(session, order.id)
+        # Enqueue per-item phase-1 processing immediately.
+        from app.workers.queue import enqueue_process_item
+        item_ids = [it.id for it in order.items]
+        await session.commit()
+        for item_id in item_ids:
+            await enqueue_process_item(item_id)
+        return {"order_id": order_id, "status": order.status.value}
 
     await session.commit()
     return {"order_id": order_id, "status": order.status.value}
+
+
+# ── Item approval queue ────────────────────────────────────────────────────
+
+
+@router.get("/items/pending-approval")
+async def list_pending_approval(
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+    session: AsyncSession = Depends(get_session),
+) -> list[dict]:
+    """List all order items currently awaiting admin approval."""
+    items = (
+        await session.execute(
+            select(OrderItem)
+            .options(selectinload(OrderItem.order))
+            .where(OrderItem.status == OrderItemStatus.AWAITING_APPROVAL)
+            .order_by(OrderItem.updated_at)
+            .limit(limit)
+            .offset(offset)
+        )
+    ).scalars().all()
+
+    result = []
+    for item in items:
+        order = item.order
+        is_multi = len(item.character_ids) > 1
+        # For multi-char: show composite image. For single-char: show video.
+        preview_url: str | None = None
+        if is_multi and item.composite_image_s3_key:
+            preview_url = storage.presigned_get_url(item.composite_image_s3_key, expires_in=3600)
+        elif not is_multi and item.video_s3_key:
+            preview_url = storage.presigned_get_url(item.video_s3_key, expires_in=3600)
+
+        result.append({
+            "item_id": item.id,
+            "order_id": item.order_id,
+            "sequence": item.sequence,
+            "character_ids": item.character_ids,
+            "recipient_name": order.recipient_name,
+            "recipient_age": order.recipient_age,
+            "occasion_slug": order.occasion_slug,
+            "is_multi_character": is_multi,
+            "preview_type": "image" if is_multi else "video",
+            "preview_url": preview_url,
+            "updated_at": item.updated_at,
+        })
+    return result
+
+
+@router.post("/items/{item_id}/approve", status_code=status.HTTP_200_OK)
+async def approve_item(item_id: int, session: AsyncSession = Depends(get_session)) -> dict:
+    """Approve a pending item: triggers video generation (multi-char) or delivery (single-char)."""
+    item = (
+        await session.execute(select(OrderItem).where(OrderItem.id == item_id))
+    ).scalar_one_or_none()
+    if item is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND)
+    if item.status != OrderItemStatus.AWAITING_APPROVAL:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            detail=f"item is {item.status.value}, expected AWAITING_APPROVAL",
+        )
+    item.status = OrderItemStatus.APPROVED
+    await session.commit()
+
+    from app.workers.queue import enqueue_generate_video
+    await enqueue_generate_video(item_id)
+    return {"item_id": item_id, "status": item.status.value}
+
+
+@router.post("/items/{item_id}/reject", status_code=status.HTTP_200_OK)
+async def reject_item(item_id: int, session: AsyncSession = Depends(get_session)) -> dict:
+    """Reject a pending item (marks it FAILED so it can be retried or investigated)."""
+    item = (
+        await session.execute(select(OrderItem).where(OrderItem.id == item_id))
+    ).scalar_one_or_none()
+    if item is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND)
+    if item.status != OrderItemStatus.AWAITING_APPROVAL:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            detail=f"item is {item.status.value}, expected AWAITING_APPROVAL",
+        )
+    item.status = OrderItemStatus.FAILED
+    item.error = "rejected by admin"
+    await session.commit()
+    return {"item_id": item_id, "status": item.status.value}
+
+
+@router.post("/items/{item_id}/retry", status_code=status.HTTP_200_OK)
+async def retry_item(item_id: int, session: AsyncSession = Depends(get_session)) -> dict:
+    """Re-enqueue a FAILED item for phase-1 processing."""
+    item = (
+        await session.execute(select(OrderItem).where(OrderItem.id == item_id))
+    ).scalar_one_or_none()
+    if item is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND)
+    if item.status != OrderItemStatus.FAILED:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            detail=f"item is {item.status.value}, expected FAILED",
+        )
+    item.status = OrderItemStatus.PENDING
+    item.error = None
+    await session.commit()
+
+    from app.workers.queue import enqueue_process_item
+    await enqueue_process_item(item_id)
+    return {"item_id": item_id, "status": item.status.value}
 
 
 # ── Batches ────────────────────────────────────────────────────────────────

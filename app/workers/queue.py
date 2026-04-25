@@ -30,3 +30,15 @@ async def enqueue_run_batch(batch_id: int) -> None:
 async def enqueue_collector_check() -> None:
     pool = await get_pool()
     await pool.enqueue_job("collector_check")
+
+
+async def enqueue_process_item(item_id: int) -> None:
+    """Phase 1: composite (multi-char) or video (single-char) → AWAITING_APPROVAL."""
+    pool = await get_pool()
+    await pool.enqueue_job("process_item_phase1", item_id)
+
+
+async def enqueue_generate_video(item_id: int) -> None:
+    """Phase 2 (after admin approval): generate video for already-composited item, then deliver."""
+    pool = await get_pool()
+    await pool.enqueue_job("generate_video_for_approved_item", item_id)
