@@ -85,29 +85,29 @@ def _redis_key(session_id: str) -> str:
 
 
 async def _load_history(session_id: str) -> list[dict[str, str]]:
-    from app.workers.queue import get_pool  # lazy import to avoid circular deps
-
-    pool = await get_pool()
-    raw = await pool.get(_redis_key(session_id))  # type: ignore[union-attr]
-    if raw is None:
-        return []
     try:
+        from app.workers.queue import get_pool  # lazy import to avoid circular deps
+        pool = await get_pool()
+        raw = await pool.get(_redis_key(session_id))  # type: ignore[union-attr]
+        if raw is None:
+            return []
         return json.loads(raw)
-    except (ValueError, TypeError):
+    except Exception:  # Redis unavailable — stateless degradation
         return []
 
 
 async def _save_history(session_id: str, history: list[dict[str, str]]) -> None:
-    from app.workers.queue import get_pool
-
-    pool = await get_pool()
-    # Trim to MAX_HISTORY_TURNS pairs (each pair = 2 messages)
-    trimmed = history[-(MAX_HISTORY_TURNS * 2):]
-    await pool.set(  # type: ignore[union-attr]
-        _redis_key(session_id),
-        json.dumps(trimmed),
-        ex=HISTORY_TTL_SECONDS,
-    )
+    try:
+        from app.workers.queue import get_pool
+        pool = await get_pool()
+        trimmed = history[-(MAX_HISTORY_TURNS * 2):]
+        await pool.set(  # type: ignore[union-attr]
+            _redis_key(session_id),
+            json.dumps(trimmed),
+            ex=HISTORY_TTL_SECONDS,
+        )
+    except Exception:  # Redis unavailable — skip saving
+        pass
 
 
 async def _call_llm(history: list[dict[str, str]]) -> list[str]:

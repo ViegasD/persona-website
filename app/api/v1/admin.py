@@ -16,6 +16,8 @@ from app.db.models import (
     BatchTrigger,
     Order,
     OrderStatus,
+    Payment,
+    PaymentStatus,
     Plan,
 )
 from app.db.session import get_session
@@ -99,6 +101,38 @@ async def refund_order(order_id: int, session: AsyncSession = Depends(get_sessio
         raise HTTPException(status.HTTP_404_NOT_FOUND)
     order.status = OrderStatus.REFUNDED
     await session.commit()
+
+
+@router.post("/orders/{order_id}/approve", status_code=status.HTTP_200_OK)
+async def approve_order(order_id: int, session: AsyncSession = Depends(get_session)) -> dict:
+    """Force-approve a payment for testing (bypasses MercadoPago)."""
+    order = (
+        await session.execute(
+            select(Order).options(selectinload(Order.items)).where(Order.id == order_id)
+        )
+    ).scalar_one_or_none()
+    if order is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND)
+
+    payment = (
+        await session.execute(
+            select(Payment).where(Payment.order_id == order_id).order_by(Payment.id.desc())
+        )
+    ).scalar_one_or_none()
+
+    now = datetime.now(UTC)
+    if payment is not None and payment.status != PaymentStatus.APPROVED:
+        payment.status = PaymentStatus.APPROVED
+        payment.paid_at = now
+
+    if order.status not in {OrderStatus.PAID, OrderStatus.QUEUED, OrderStatus.RENDERING, OrderStatus.READY, OrderStatus.DELIVERED}:
+        order.status = OrderStatus.PAID
+        order.paid_at = now
+        await session.flush()
+        await batch_collector.attach_paid_order(session, order.id)
+
+    await session.commit()
+    return {"order_id": order_id, "status": order.status.value}
 
 
 # ── Batches ────────────────────────────────────────────────────────────────
