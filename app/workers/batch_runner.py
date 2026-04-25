@@ -70,7 +70,7 @@ async def _load_characters(character_slugs: list[str]) -> list[dict[str, Any]]:
         rows = (
             await session.execute(
                 text(
-                    'SELECT slug, name, description, "thumbnailS3Key" '
+                    "SELECT slug, name, description, thumbnail_s3_key "
                     "FROM web.character_v WHERE slug = ANY(:slugs)"
                 ),
                 {"slugs": character_slugs},
