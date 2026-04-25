@@ -20,10 +20,27 @@ async def orders_by_phone(
     phone: str,
     session: AsyncSession = Depends(get_session),
 ) -> list[dict]:
-    """List all orders for a guest phone (debug)."""
+    """List all orders for a guest phone (debug). Uses LIKE for partial match."""
     orders = (
         await session.execute(
-            select(Order).where(Order.guest_phone == phone).order_by(Order.id.desc())
+            select(Order)
+            .where(Order.guest_phone.like(f"%{phone}%"))
+            .order_by(Order.id.desc())
+            .limit(20)
+        )
+    ).scalars().all()
+    return [{"id": o.id, "status": o.status, "guest_phone": o.guest_phone, "created_at": str(o.created_at)} for o in orders]
+
+
+@router.get("/orders-recent")
+async def orders_recent(
+    limit: int = 10,
+    session: AsyncSession = Depends(get_session),
+) -> list[dict]:
+    """List most recent orders (debug)."""
+    orders = (
+        await session.execute(
+            select(Order).order_by(Order.id.desc()).limit(limit)
         )
     ).scalars().all()
     return [{"id": o.id, "status": o.status, "guest_phone": o.guest_phone, "created_at": str(o.created_at)} for o in orders]
