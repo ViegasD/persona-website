@@ -18,6 +18,15 @@ from app.core.settings import get_settings
 
 EXTERNAL_REF_PREFIX = "web_"
 
+_sdk_instance: mercadopago.SDK | None = None
+
+
+def _sdk() -> mercadopago.SDK:
+    global _sdk_instance
+    if _sdk_instance is None:
+        _sdk_instance = mercadopago.SDK(get_settings().mercadopago_access_token)
+    return _sdk_instance
+
 
 def make_external_reference(order_id: int) -> str:
     return f"{EXTERNAL_REF_PREFIX}{order_id}"
@@ -30,10 +39,6 @@ def parse_external_reference(ref: str | None) -> int | None:
         return int(ref[len(EXTERNAL_REF_PREFIX) :])
     except ValueError:
         return None
-
-
-def _sdk() -> mercadopago.SDK:
-    return mercadopago.SDK(get_settings().mercadopago_access_token)
 
 
 async def create_pix_payment(
