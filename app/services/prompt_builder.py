@@ -50,7 +50,16 @@ def _build_shared_header(scene_description: str) -> list[str]:
     parts: list[str] = []
     parts.append(
         f"{scene_description.strip()} "
-        "high detail, vibrant colors, cinematic lighting, perfectly consistent with the reference image."
+        "Reproduce the character(s) EXACTLY as shown in the reference image — "
+        "same art style, same colors, same outfit, same proportions, same face. "
+        "Do not redesign, reinterpret, or change any visual detail."
+    )
+    parts.append("")
+    parts.append(
+        "CRITICAL — REFERENCE IMAGE FIDELITY: "
+        "The character's appearance, clothing, colors, art style and proportions must be "
+        "IDENTICAL to the reference image throughout the entire video. "
+        "Any deviation from the reference image is not acceptable."
     )
     parts.append("")
     parts.append(

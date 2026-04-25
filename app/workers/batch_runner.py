@@ -526,7 +526,8 @@ async def _generate_and_store_video(
 
     char_names = ", ".join(c["name"] for c in chars)
     scene_description = (
-        f"{char_names} standing on a vibrant, kid-friendly stage with warm lighting"
+        f"{char_names} — use the reference image exactly, preserve every visual detail of the character(s) — "
+        f"standing on a vibrant, kid-friendly stage with warm lighting"
     )
     prompt_text = build_video_prompt(
         VideoPromptInputs(
