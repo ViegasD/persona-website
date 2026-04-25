@@ -564,7 +564,7 @@ async def _generate_and_store_video(
         image_url=input_image_url,
         duration=settings.xai_video_duration_seconds,
         aspect_ratio=settings.xai_video_aspect_ratio,
-        resolution="1080p" if quality == "hd" else "720p",
+        resolution="720p" if quality == "hd" else "480p",
     )
     result = await xai_client.wait_for_video(request_id)
     video_info = result.get("video") or {}
