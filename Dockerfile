@@ -17,9 +17,9 @@ RUN pip install --upgrade pip && pip install .
 COPY app ./app
 COPY alembic ./alembic
 COPY alembic.ini ./
+COPY start.sh ./
+RUN chmod +x start.sh
 
 EXPOSE 8000
 
-# Default command runs the API. The worker container overrides this with:
-#   CMD ["arq", "app.workers.batch_runner.WorkerSettings"]
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["./start.sh"]
