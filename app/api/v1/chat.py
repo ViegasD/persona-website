@@ -1,15 +1,24 @@
 """Chat endpoint — stateful AI conversation for the web frontend.
 
 POST /api/v1/chat/message
-    Body: { "session_id": "...", "message": "..." }
-    Returns: { "session_id": "...", "messages": ["bolha 1", "bolha 2"] }
+    Body: { "session_id": "...", "message": "...", "guest_phone": "..." }
+    Returns: {
+        "session_id": "...",
+        "messages": ["bolha 1", "bolha 2"],
+        "payment": null | {
+            "order_id": 1,
+            "payment_id": 1,
+            "qr_code_payload": "...",
+            "qr_code_base64": "...",
+            "ticket_url": "...",
+            "expires_at": "...",
+            "amount_cents": 1990
+        },
+        "order_id": null | 1
+    }
 
 DELETE /api/v1/chat/session/{session_id}
-    Clears conversation history (e.g. on logout / new chat).
-
-The session is keyed by ``session_id`` — a UUID the frontend generates on
-first load and persists in localStorage. No auth required (anyone who knows
-the session id can read it, which is fine for a chat session).
+    Clears conversation history and order state.
 
 Context injection
 -----------------
@@ -21,6 +30,7 @@ pricing and character names without fine-tuning.
 from __future__ import annotations
 
 import uuid
+from datetime import datetime
 
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel, Field
@@ -43,11 +53,24 @@ class ChatMessageIn(BaseModel):
         description="Client-generated UUID; auto-created if omitted.",
     )
     message: str = Field(..., min_length=1, max_length=2000)
+    guest_phone: str | None = Field(None, max_length=32)
+
+
+class PaymentOut(BaseModel):
+    order_id: int
+    payment_id: int
+    qr_code_payload: str
+    qr_code_base64: str | None = None
+    ticket_url: str | None = None
+    expires_at: datetime | None = None
+    amount_cents: int
 
 
 class ChatMessageOut(BaseModel):
     session_id: str
     messages: list[str]
+    payment: PaymentOut | None = None
+    order_id: int | None = None
 
 
 # ── Context builder ────────────────────────────────────────────────────────
@@ -96,12 +119,32 @@ async def _build_context(session: AsyncSession) -> str:
 async def send_message(
     body: ChatMessageIn,
     session: AsyncSession = Depends(get_session),
-) -> ChatReply:
+) -> ChatMessageOut:
     context = await _build_context(session)
-    return await chat_turn(
+    reply: ChatReply = await chat_turn(
         session_id=body.session_id,
         user_message=body.message,
         extra_context=context or None,
+        db_session=session,
+        guest_phone=body.guest_phone,
+    )
+    payment_out = None
+    if reply.payment is not None:
+        p = reply.payment
+        payment_out = PaymentOut(
+            order_id=p.order_id,
+            payment_id=p.payment_id,
+            qr_code_payload=p.qr_code_payload,
+            qr_code_base64=p.qr_code_base64,
+            ticket_url=p.ticket_url,
+            expires_at=p.expires_at,
+            amount_cents=p.amount_cents,
+        )
+    return ChatMessageOut(
+        session_id=reply.session_id,
+        messages=reply.messages,
+        payment=payment_out,
+        order_id=reply.order_id,
     )
 
 

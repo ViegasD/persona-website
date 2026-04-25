@@ -152,6 +152,9 @@ class OrderOut(BaseModel):
     created_at: datetime
     paid_at: datetime | None
     delivered_at: datetime | None
+    # Signed token the frontend sends as X-Guest-Token header on subsequent
+    # requests so ownership is verified without relying on third-party cookies.
+    guest_token: str | None = None
 
 
 class OrderCheckoutOut(BaseModel):

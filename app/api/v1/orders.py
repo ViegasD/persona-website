@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import cast
 
-from fastapi import APIRouter, Cookie, Depends, HTTPException, Response, status
+from fastapi import APIRouter, Cookie, Depends, Header, HTTPException, Response, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -45,6 +45,7 @@ async def _load_order(
     *,
     user_id: int | None,
     guest_order_ids: list[int],
+    guest_token: str | None = None,
 ) -> Order:
     stmt = (
         select(Order)
@@ -58,10 +59,15 @@ async def _load_order(
         return order
     if order.id in guest_order_ids:
         return order
+    # Fallback: verify X-Guest-Token header (avoids third-party cookie blocking)
+    if guest_token:
+        token_ids = verify_guest_orders(guest_token)
+        if order.id in token_ids:
+            return order
     raise HTTPException(status.HTTP_403_FORBIDDEN, detail="not your order")
 
 
-def _to_out(order: Order) -> OrderOut:
+def _to_out(order: Order, *, guest_token: str | None = None) -> OrderOut:
     return OrderOut(
         id=order.id,
         status=order.status,
@@ -76,6 +82,7 @@ def _to_out(order: Order) -> OrderOut:
         created_at=order.created_at,
         paid_at=order.paid_at,
         delivered_at=order.delivered_at,
+        guest_token=guest_token,
     )
 
 
@@ -138,13 +145,14 @@ async def create_order(
     await session.flush()
 
     # Maintain a list of all order IDs the guest has created in this browser.
+    guest_token: str | None = None
     if user_id is None:
         prior_ids = verify_guest_orders(existing_cookie) if existing_cookie else []
         merged_ids = prior_ids + [order.id] if order.id not in prior_ids else prior_ids
-        token = sign_guest_orders(merged_ids)
+        guest_token = sign_guest_orders(merged_ids)
         response.set_cookie(
             GUEST_COOKIE_NAME,
-            token,
+            guest_token,
             httponly=True,
             samesite="none",
             secure=True,
@@ -153,7 +161,10 @@ async def create_order(
 
     await session.commit()
     await session.refresh(order, attribute_names=["items", "plan"])
-    return _to_out(order)
+    # guest_token is also returned in the response body so the frontend can
+    # pass it back as X-Guest-Token on fill/checkout — avoids third-party
+    # cookie issues when the storefront HTML is on a different origin.
+    return _to_out(order, guest_token=guest_token)
 
 
 @router.get("/{order_id}", response_model=OrderOut)
@@ -161,9 +172,10 @@ async def get_order(
     order_id: int,
     user_id: int | None = Depends(get_current_user_id),
     guest_order_ids: list[int] = Depends(get_guest_order_ids),
+    x_guest_token: str | None = Header(default=None, alias="X-Guest-Token"),
     session: AsyncSession = Depends(get_session),
 ) -> OrderOut:
-    order = await _load_order(session, order_id, user_id=user_id, guest_order_ids=guest_order_ids)
+    order = await _load_order(session, order_id, user_id=user_id, guest_order_ids=guest_order_ids, guest_token=x_guest_token)
     return _to_out(order)
 
 
@@ -275,6 +287,7 @@ async def fill_items(
     payload: OrderFillIn,
     user_id: int | None = Depends(get_current_user_id),
     guest_order_ids: list[int] = Depends(get_guest_order_ids),
+    x_guest_token: str | None = Header(default=None, alias="X-Guest-Token"),
     session: AsyncSession = Depends(get_session),
 ) -> OrderOut:
     """Replace all items with one item per character slug (up to plan.video_count).
@@ -283,7 +296,7 @@ async def fill_items(
     This endpoint clears existing DRAFT items and re-creates them so a single
     call is sufficient regardless of how many videos the plan includes.
     """
-    order = await _load_order(session, order_id, user_id=user_id, guest_order_ids=guest_order_ids)
+    order = await _load_order(session, order_id, user_id=user_id, guest_order_ids=guest_order_ids, guest_token=x_guest_token)
     _ensure_draft(order)
 
     slugs = payload.character_slugs[: order.plan.video_count]
@@ -315,10 +328,11 @@ async def checkout(
     order_id: int,
     user_id: int | None = Depends(get_current_user_id),
     guest_order_ids: list[int] = Depends(get_guest_order_ids),
+    x_guest_token: str | None = Header(default=None, alias="X-Guest-Token"),
     session: AsyncSession = Depends(get_session),
 ) -> OrderCheckoutOut:
     settings = get_settings()
-    order = await _load_order(session, order_id, user_id=user_id, guest_order_ids=guest_order_ids)
+    order = await _load_order(session, order_id, user_id=user_id, guest_order_ids=guest_order_ids, guest_token=x_guest_token)
 
     if order.status not in {OrderStatus.DRAFT, OrderStatus.AWAITING_PAYMENT}:
         raise HTTPException(status.HTTP_409_CONFLICT, detail=f"cannot checkout in status {order.status}")
