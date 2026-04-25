@@ -45,21 +45,16 @@ class VideoPromptInputs:
     duration_seconds: int = 10
 
 
-def build_video_prompt(inputs: VideoPromptInputs) -> str:
-    n = len(inputs.characters)
-    if n < 1:
-        raise ValueError("at least one character is required")
-    labels = POSITIONAL_LABELS_BY_COUNT.get(n) or [f"#{i + 1}" for i in range(n)]
-
-    # ── Header ─────────────────────────────────────────────────────────
+def _build_shared_header(scene_description: str) -> list[str]:
+    """Header lines shared by both single and multi-character prompts."""
     parts: list[str] = []
     parts.append(
-        f"{inputs.scene_description.strip()} "
+        f"{scene_description.strip()} "
         "high detail, vibrant colors, cinematic lighting, perfectly consistent with the reference image."
     )
     parts.append("")
     parts.append(
-        "IMPORTANT: All characters must remain in the exact same positions and orientation as the "
+        "IMPORTANT: The character must remain in the exact same position and orientation as the "
         "reference image, always facing directly toward the camera, no side view, no rotation, "
         "no change in body position."
     )
@@ -78,8 +73,51 @@ def build_video_prompt(inputs: VideoPromptInputs) -> str:
         "Only allowed movement: mouth (lip sync), blinking, very subtle head micro-movements"
     )
     parts.append("")
+    return parts
 
-    # ── Body / scene progression ──────────────────────────────────────
+
+def _build_single_character_prompt(inputs: VideoPromptInputs) -> str:
+    """Simple monologue prompt for a single-character video."""
+    char = inputs.characters[0]
+    parts = _build_shared_header(inputs.scene_description)
+
+    parts.append(
+        f"The video is a continuous {inputs.duration_seconds}-second shot. "
+        "The character speaks naturally throughout."
+    )
+    parts.append("")
+
+    descriptor = f" ({char.descriptor})" if char.descriptor else ""
+    parts.append(f"The character{descriptor} says in Brazilian Portuguese:")
+    # Combine the individual line and the group line into one natural speech
+    speech = f"{char.line_pt.strip()} {inputs.group_line_pt.strip()}"
+    parts.append(speech)
+    parts.append("")
+    parts.append(
+        f"Timing guidance: all speech must finish before the last 2 seconds to avoid being cut off."
+    )
+    parts.append("")
+    parts.append("Animation: lips, blinking, minimal facial expression only — no body movement")
+    parts.append(
+        "Audio: clear Brazilian Portuguese, natural voice matching the character, accurate lip sync"
+    )
+
+    return "\n".join(parts).strip()
+
+
+def _build_multi_character_prompt(inputs: VideoPromptInputs) -> str:
+    """Turn-based scene progression prompt for multi-character videos."""
+    n = len(inputs.characters)
+    labels = POSITIONAL_LABELS_BY_COUNT.get(n) or [f"#{i + 1}" for i in range(n)]
+
+    parts = _build_shared_header(inputs.scene_description)
+    # Override the "character" wording to plural
+    parts[2] = (
+        "IMPORTANT: All characters must remain in the exact same positions and orientation as the "
+        "reference image, always facing directly toward the camera, no side view, no rotation, "
+        "no change in body position."
+    )
+
     parts.append(
         f"The video is a continuous {inputs.duration_seconds}-second shot. "
         "Only one character speaks at a time, while the others remain still with subtle idle "
@@ -90,16 +128,16 @@ def build_video_prompt(inputs: VideoPromptInputs) -> str:
     parts.append("")
 
     for idx, (label, char) in enumerate(zip(labels, inputs.characters, strict=True)):
-        ordinal = "First" if idx == 0 else ("Then" if idx < n - 1 else "Then")
+        ordinal = "First" if idx == 0 else "Then"
         descriptor = f" ({char.descriptor})" if char.descriptor else ""
         parts.append(
             f"{ordinal}, the {label} character{descriptor} speaks, maintaining the same pose, "
             "only moving lips and slight facial expression."
         )
-        parts.append("She says in Brazilian Portuguese:")
+        parts.append("They say in Brazilian Portuguese:")
         parts.append(char.line_pt.strip())
         parts.append("")
-        parts.append("Then she becomes still.")
+        parts.append("Then the character becomes still.")
         parts.append("")
 
     # ── Final group line ──────────────────────────────────────────────
@@ -108,22 +146,25 @@ def build_video_prompt(inputs: VideoPromptInputs) -> str:
         "no body or hand movement, only synchronized lip movement and subtle facial expression."
     )
     parts.append("This final line must start early enough to finish before the video ends.")
-    if n > 1:
-        parts.append("All characters say together in sync:")
-    else:
-        parts.append("She says:")
+    parts.append("All characters say together in sync:")
     parts.append(inputs.group_line_pt.strip())
     parts.append("")
     parts.append(
-        f"Timing guidance: the final group line must begin before the last 2 seconds to avoid being cut off."
+        "Timing guidance: the final group line must begin before the last 2 seconds to avoid being cut off."
     )
     parts.append("")
     parts.append("Animation: lips, blinking, minimal facial expression only — no body movement")
     parts.append(
-        "Audio: clear Brazilian Portuguese, natural female voices, accurate lip sync, no overlap except final line"
-    )
-    parts.append(
-        "Style: cute, vibrant, polished animation, no distortion, no style drift"
+        "Audio: clear Brazilian Portuguese, natural voices matching the characters, accurate lip sync, no overlap except final line"
     )
 
     return "\n".join(parts).strip()
+
+
+def build_video_prompt(inputs: VideoPromptInputs) -> str:
+    n = len(inputs.characters)
+    if n < 1:
+        raise ValueError("at least one character is required")
+    if n == 1:
+        return _build_single_character_prompt(inputs)
+    return _build_multi_character_prompt(inputs)

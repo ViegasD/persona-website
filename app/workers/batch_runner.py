@@ -524,16 +524,18 @@ async def _generate_and_store_video(
         user_message=custom_message,
     )
 
+    char_names = ", ".join(c["name"] for c in chars)
     scene_description = (
-        f"{len(chars)} stylized 3D animated character"
-        + ("s" if len(chars) > 1 else "")
-        + " standing side by side on a vibrant, kid-friendly stage with warm lighting"
+        f"{char_names} standing on a vibrant, kid-friendly stage with warm lighting"
     )
     prompt_text = build_video_prompt(
         VideoPromptInputs(
             scene_description=scene_description,
             characters=[
-                CharacterLine(descriptor=chars[i]["descriptor"], line_pt=script.character_lines[i])
+                CharacterLine(
+                    descriptor=chars[i]["descriptor"] or chars[i]["name"],
+                    line_pt=script.character_lines[i],
+                )
                 for i in range(len(chars))
             ],
             group_line_pt=script.group_line,
