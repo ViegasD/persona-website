@@ -12,6 +12,7 @@ import asyncio
 from typing import Any
 
 import httpx
+from loguru import logger
 
 from app.core.settings import get_settings
 
@@ -48,6 +49,16 @@ async def start_image_to_video(
         "aspect_ratio": aspect_ratio,
         "resolution": resolution,
     }
+    logger.info(
+        "xAI start_image_to_video | model={model} duration={dur}s aspect={ar} "
+        "prompt_len={plen} image_url_prefix={img_prefix}",
+        model=body["model"],
+        dur=body["duration"],
+        ar=body["aspect_ratio"],
+        plen=len(prompt),
+        img_prefix=(image_url[:80] + "…") if len(image_url) > 80 else image_url,
+    )
+    logger.debug("xAI prompt text:\n{p}", p=prompt)
     async with httpx.AsyncClient(timeout=60) as client:
         resp = await client.post(url, json=body, headers=_headers())
         if resp.status_code >= 400:
@@ -56,6 +67,7 @@ async def start_image_to_video(
     rid = data.get("request_id")
     if not rid:
         raise XaiError(f"xAI start returned no request_id: {data}")
+    logger.info("xAI request_id={rid}", rid=rid)
     return str(rid)
 
 
@@ -75,7 +87,9 @@ async def wait_for_video(
     while True:
         data = await get_video(request_id)
         status = (data.get("status") or "").lower()
+        logger.info("xAI poll request_id={rid} status={s}", rid=request_id, s=status)
         if status == "done":
+            logger.info("xAI video ready: {data}", data=data)
             return data
         if status in {"failed", "expired"}:
             raise XaiError(f"xAI video {request_id} {status}: {data}")

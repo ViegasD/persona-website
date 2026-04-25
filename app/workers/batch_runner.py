@@ -27,6 +27,7 @@ from sqlalchemy.orm import selectinload
 
 from app.core.logging import configure_logging
 from app.core.settings import get_settings
+from loguru import logger
 from app.db.models import (
     Batch,
     BatchItem,
@@ -524,7 +525,14 @@ async def _generate_and_store_video(
         user_message=custom_message,
     )
 
+    char_slugs = [c["id"] for c in chars]
     char_names = ", ".join(c["name"] for c in chars)
+    logger.info(
+        "[item {item_id}] generate_video | chars={slugs} image_url_bytes={img_bytes}",
+        item_id=item_id,
+        slugs=char_slugs,
+        img_bytes=len(input_image_url),
+    )
     scene_description = (
         f"{char_names} — use the reference image exactly, preserve every visual detail of the character(s) — "
         f"standing on a vibrant, kid-friendly stage with warm lighting"

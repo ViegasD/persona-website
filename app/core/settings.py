@@ -59,7 +59,7 @@ class Settings(BaseSettings):
     xai_api_key: str | None = Field(None, alias="XAI_API_KEY")
     xai_api_base: str = Field("https://api.x.ai/v1", alias="XAI_API_BASE")
     xai_video_model: str = Field("grok-imagine-video", alias="XAI_VIDEO_MODEL")
-    xai_video_duration_seconds: int = Field(10, alias="XAI_VIDEO_DURATION_SECONDS")
+    xai_video_duration_seconds: int = Field(8, alias="XAI_VIDEO_DURATION_SECONDS")
     xai_video_aspect_ratio: str = Field("9:16", alias="XAI_VIDEO_ASPECT_RATIO")
     xai_video_resolution: str = Field("720p", alias="XAI_VIDEO_RESOLUTION")
 
