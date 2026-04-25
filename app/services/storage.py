@@ -52,6 +52,21 @@ def presigned_get_url(key: str, expires_in: int = 3600) -> str:
     )
 
 
+def get_image_as_data_url(key: str) -> str:
+    """Download an image from S3 and return it as a base64 data URL.
+
+    Use this instead of presigned_get_url when the URL will be sent to an
+    external API (e.g. xAI) that cannot reach the internal MinIO endpoint.
+    """
+    import base64
+    import mimetypes
+
+    data = download_bytes(key)
+    mime = mimetypes.guess_type(key)[0] or "image/jpeg"
+    b64 = base64.b64encode(data).decode()
+    return f"data:{mime};base64,{b64}"
+
+
 def download_bytes(key: str) -> bytes:
     obj = _client().get_object(Bucket=_settings.s3_bucket, Key=key)
     return obj["Body"].read()

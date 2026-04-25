@@ -83,9 +83,9 @@ async def _load_characters(character_slugs: list[str]) -> list[dict[str, Any]]:
         if row is None:
             raise RuntimeError(f"character '{slug}' not found in catalog view")
         thumb_key = row[3]
-        url = storage.presigned_get_url(thumb_key, expires_in=6 * 3600) if thumb_key else None
-        if not url:
+        if not thumb_key:
             raise RuntimeError(f"character '{slug}' has no reference image")
+        url = storage.get_image_as_data_url(thumb_key)
         out.append(
             {
                 "id": slug,
@@ -120,7 +120,7 @@ async def _resolve_composite_url(
             )
         ).scalar_one_or_none()
     if cached:
-        return storage.presigned_get_url(cached.s3_key, expires_in=6 * 3600), cached.s3_key
+        return storage.get_image_as_data_url(cached.s3_key), cached.s3_key
 
     # Build a tight, kid-safe composite prompt — Nano Banana is good at this.
     descriptors = ", ".join(
@@ -151,7 +151,7 @@ async def _resolve_composite_url(
             CompositeFrameCache(sha=sha, s3_key=s3_key, character_ids=item.character_ids)
         )
         await session.commit()
-    return storage.presigned_get_url(s3_key, expires_in=6 * 3600), s3_key
+    return storage.get_image_as_data_url(s3_key), s3_key
 
 
 # ─────────────────────────── per-item task (legacy batch) ─────────────────
@@ -437,7 +437,7 @@ async def generate_video_for_approved_item(ctx: dict[str, Any], item_id: int) ->
             # Multi-char: composite exists, need to generate video now
             chars = await _load_characters(char_ids)
             input_image_url = (
-                storage.presigned_get_url(composite_key, expires_in=6 * 3600)
+                storage.get_image_as_data_url(composite_key)
                 if composite_key
                 else (await _resolve_composite_url(item, chars, recipient_name=recipient_name, occasion_slug=occasion_slug))[0]
             )
