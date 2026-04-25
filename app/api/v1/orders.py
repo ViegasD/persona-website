@@ -9,8 +9,8 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.api.deps import GUEST_COOKIE_NAME, get_current_user_id, get_guest_order_id
-from app.core.security import sign_guest_order
+from app.api.deps import GUEST_COOKIE_NAME, get_current_user_id, get_guest_order_ids
+from app.core.security import sign_guest_orders, verify_guest_orders
 from app.core.settings import get_settings
 from app.db.models import (
     Order,
@@ -44,7 +44,7 @@ async def _load_order(
     order_id: int,
     *,
     user_id: int | None,
-    guest_order_id: int | None,
+    guest_order_ids: list[int],
 ) -> Order:
     stmt = (
         select(Order)
@@ -56,7 +56,7 @@ async def _load_order(
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="order not found")
     if order.user_id is not None and order.user_id == user_id:
         return order
-    if guest_order_id == order.id:
+    if order.id in guest_order_ids:
         return order
     raise HTTPException(status.HTTP_403_FORBIDDEN, detail="not your order")
 
@@ -116,6 +116,7 @@ async def create_order(
     payload: OrderCreate,
     response: Response,
     user_id: int | None = Depends(get_current_user_id),
+    existing_cookie: str | None = Cookie(default=None, alias=GUEST_COOKIE_NAME),
     session: AsyncSession = Depends(get_session),
 ) -> OrderOut:
     plan = (await session.execute(select(Plan).where(Plan.slug == payload.plan_id))).scalar_one_or_none()
@@ -136,9 +137,11 @@ async def create_order(
     session.add(order)
     await session.flush()
 
-    # Sign a guest cookie so anonymous browsers can return to /orders/{id}.
+    # Maintain a list of all order IDs the guest has created in this browser.
     if user_id is None:
-        token = sign_guest_order(order.id)
+        prior_ids = verify_guest_orders(existing_cookie) if existing_cookie else []
+        merged_ids = prior_ids + [order.id] if order.id not in prior_ids else prior_ids
+        token = sign_guest_orders(merged_ids)
         response.set_cookie(
             GUEST_COOKIE_NAME,
             token,
@@ -157,10 +160,10 @@ async def create_order(
 async def get_order(
     order_id: int,
     user_id: int | None = Depends(get_current_user_id),
-    guest_order_id: int | None = Depends(get_guest_order_id),
+    guest_order_ids: list[int] = Depends(get_guest_order_ids),
     session: AsyncSession = Depends(get_session),
 ) -> OrderOut:
-    order = await _load_order(session, order_id, user_id=user_id, guest_order_id=guest_order_id)
+    order = await _load_order(session, order_id, user_id=user_id, guest_order_ids=guest_order_ids)
     return _to_out(order)
 
 
@@ -169,10 +172,10 @@ async def update_order(
     order_id: int,
     payload: OrderUpdate,
     user_id: int | None = Depends(get_current_user_id),
-    guest_order_id: int | None = Depends(get_guest_order_id),
+    guest_order_ids: list[int] = Depends(get_guest_order_ids),
     session: AsyncSession = Depends(get_session),
 ) -> OrderOut:
-    order = await _load_order(session, order_id, user_id=user_id, guest_order_id=guest_order_id)
+    order = await _load_order(session, order_id, user_id=user_id, guest_order_ids=guest_order_ids)
     _ensure_draft(order)
     data = payload.model_dump(exclude_unset=True)
     for key, value in data.items():
@@ -187,10 +190,10 @@ async def add_item(
     order_id: int,
     payload: OrderItemCreate,
     user_id: int | None = Depends(get_current_user_id),
-    guest_order_id: int | None = Depends(get_guest_order_id),
+    guest_order_ids: list[int] = Depends(get_guest_order_ids),
     session: AsyncSession = Depends(get_session),
 ) -> OrderItemOut:
-    order = await _load_order(session, order_id, user_id=user_id, guest_order_id=guest_order_id)
+    order = await _load_order(session, order_id, user_id=user_id, guest_order_ids=guest_order_ids)
     _ensure_draft(order)
 
     if len(payload.character_ids) > order.plan.max_characters_per_video:
@@ -219,10 +222,10 @@ async def update_item(
     item_id: int,
     payload: OrderItemUpdate,
     user_id: int | None = Depends(get_current_user_id),
-    guest_order_id: int | None = Depends(get_guest_order_id),
+    guest_order_ids: list[int] = Depends(get_guest_order_ids),
     session: AsyncSession = Depends(get_session),
 ) -> OrderItemOut:
-    order = await _load_order(session, order_id, user_id=user_id, guest_order_id=guest_order_id)
+    order = await _load_order(session, order_id, user_id=user_id, guest_order_ids=guest_order_ids)
     _ensure_draft(order)
 
     item = next((i for i in order.items if i.id == item_id), None)
@@ -249,10 +252,10 @@ async def delete_item(
     order_id: int,
     item_id: int,
     user_id: int | None = Depends(get_current_user_id),
-    guest_order_id: int | None = Depends(get_guest_order_id),
+    guest_order_ids: list[int] = Depends(get_guest_order_ids),
     session: AsyncSession = Depends(get_session),
 ) -> Response:
-    order = await _load_order(session, order_id, user_id=user_id, guest_order_id=guest_order_id)
+    order = await _load_order(session, order_id, user_id=user_id, guest_order_ids=guest_order_ids)
     _ensure_draft(order)
     item = next((i for i in order.items if i.id == item_id), None)
     if item is None:
@@ -271,7 +274,7 @@ async def fill_items(
     order_id: int,
     payload: OrderFillIn,
     user_id: int | None = Depends(get_current_user_id),
-    guest_order_id: int | None = Depends(get_guest_order_id),
+    guest_order_ids: list[int] = Depends(get_guest_order_ids),
     session: AsyncSession = Depends(get_session),
 ) -> OrderOut:
     """Replace all items with one item per character slug (up to plan.video_count).
@@ -280,7 +283,7 @@ async def fill_items(
     This endpoint clears existing DRAFT items and re-creates them so a single
     call is sufficient regardless of how many videos the plan includes.
     """
-    order = await _load_order(session, order_id, user_id=user_id, guest_order_id=guest_order_id)
+    order = await _load_order(session, order_id, user_id=user_id, guest_order_ids=guest_order_ids)
     _ensure_draft(order)
 
     slugs = payload.character_slugs[: order.plan.video_count]
@@ -311,11 +314,11 @@ async def fill_items(
 async def checkout(
     order_id: int,
     user_id: int | None = Depends(get_current_user_id),
-    guest_order_id: int | None = Depends(get_guest_order_id),
+    guest_order_ids: list[int] = Depends(get_guest_order_ids),
     session: AsyncSession = Depends(get_session),
 ) -> OrderCheckoutOut:
     settings = get_settings()
-    order = await _load_order(session, order_id, user_id=user_id, guest_order_id=guest_order_id)
+    order = await _load_order(session, order_id, user_id=user_id, guest_order_ids=guest_order_ids)
 
     if order.status not in {OrderStatus.DRAFT, OrderStatus.AWAITING_PAYMENT}:
         raise HTTPException(status.HTTP_409_CONFLICT, detail=f"cannot checkout in status {order.status}")
@@ -393,10 +396,10 @@ async def download_item(
     order_id: int,
     item_id: int,
     user_id: int | None = Depends(get_current_user_id),
-    guest_order_id: int | None = Depends(get_guest_order_id),
+    guest_order_ids: list[int] = Depends(get_guest_order_ids),
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, str]:
-    order = await _load_order(session, order_id, user_id=user_id, guest_order_id=guest_order_id)
+    order = await _load_order(session, order_id, user_id=user_id, guest_order_ids=guest_order_ids)
     item = next((i for i in order.items if i.id == item_id), None)
     if item is None or not item.video_s3_key:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="video not ready")

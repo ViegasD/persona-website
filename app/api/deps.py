@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from fastapi import Cookie, Depends, Header, HTTPException, status
 
-from app.core.security import decode_user_token, verify_guest_order
+from app.core.security import decode_user_token, verify_guest_orders
 from app.core.settings import get_settings
 
 GUEST_COOKIE_NAME = "persona_guest_order"
@@ -19,12 +19,12 @@ def get_current_user_id(
     return decode_user_token(token)
 
 
-def get_guest_order_id(
+def get_guest_order_ids(
     cookie: str | None = Cookie(default=None, alias=GUEST_COOKIE_NAME),
-) -> int | None:
+) -> list[int]:
     if not cookie:
-        return None
-    return verify_guest_order(cookie)
+        return []
+    return verify_guest_orders(cookie)
 
 
 def require_admin_key(
