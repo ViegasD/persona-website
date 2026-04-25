@@ -57,12 +57,22 @@ def get_image_as_data_url(key: str) -> str:
 
     Use this instead of presigned_get_url when the URL will be sent to an
     external API (e.g. xAI) that cannot reach the internal MinIO endpoint.
+    Non-JPEG/PNG formats (e.g. WebP) are converted to JPEG since xAI only
+    accepts image/jpeg and image/png data URIs.
     """
     import base64
+    import io
     import mimetypes
 
     data = download_bytes(key)
     mime = mimetypes.guess_type(key)[0] or "image/jpeg"
+    if mime not in ("image/jpeg", "image/png"):
+        from PIL import Image
+        img = Image.open(io.BytesIO(data)).convert("RGB")
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=90)
+        data = buf.getvalue()
+        mime = "image/jpeg"
     b64 = base64.b64encode(data).decode()
     return f"data:{mime};base64,{b64}"
 
