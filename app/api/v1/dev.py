@@ -15,6 +15,20 @@ from app.workers.queue import enqueue_process_item
 router = APIRouter(prefix="/dev", tags=["dev"])
 
 
+@router.get("/orders-by-phone")
+async def orders_by_phone(
+    phone: str,
+    session: AsyncSession = Depends(get_session),
+) -> list[dict]:
+    """List all orders for a guest phone (debug)."""
+    orders = (
+        await session.execute(
+            select(Order).where(Order.guest_phone == phone).order_by(Order.id.desc())
+        )
+    ).scalars().all()
+    return [{"id": o.id, "status": o.status, "guest_phone": o.guest_phone, "created_at": str(o.created_at)} for o in orders]
+
+
 @router.post("/payments/approve-by-phone", status_code=status.HTTP_200_OK)
 async def simulate_approve_by_phone(
     phone: str,
