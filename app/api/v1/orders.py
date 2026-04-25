@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.api.deps import GUEST_COOKIE_NAME, get_current_user_id, get_guest_order_ids
-from app.core.security import sign_guest_orders, verify_guest_orders
+from app.core.security import sign_guest_orders, sign_media_token, verify_guest_orders
 from app.core.settings import get_settings
 from app.db.models import (
     Order,
@@ -87,13 +87,13 @@ def _to_out(order: Order, *, guest_token: str | None = None) -> OrderOut:
 
 
 def _item_to_out(item: OrderItem) -> OrderItemOut:
+    settings = get_settings()
+    api_base = settings.api_base_url.rstrip("/")
     video_url = None
     thumb_url = None
     if item.video_s3_key:
-        try:
-            video_url = storage.presigned_get_url(item.video_s3_key, expires_in=24 * 3600)
-        except Exception:
-            video_url = None
+        token = sign_media_token(item.id)
+        video_url = f"{api_base}/api/v1/media/{token}"
     if item.thumbnail_s3_key:
         try:
             thumb_url = storage.presigned_get_url(item.thumbnail_s3_key, expires_in=24 * 3600)
@@ -115,8 +115,50 @@ def _ensure_draft(order: Order) -> None:
         raise HTTPException(status.HTTP_409_CONFLICT, detail="order no longer editable")
 
 
-# ── Endpoints ──────────────────────────────────────────────────────────────
+# ── Public lookup ──────────────────────────────────────────────────────────
 
+
+@router.get("/lookup", response_model=list[OrderOut])
+async def lookup_orders_by_contact(
+    phone: str | None = None,
+    email: str | None = None,
+    session: AsyncSession = Depends(get_session),
+) -> list[OrderOut]:
+    """Public endpoint: look up READY/DELIVERED orders by phone or email.
+
+    Returns orders that have at least one READY item so the user can watch
+    their videos. No auth required — contact info is the "password".
+    """
+    if not phone and not email:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="phone or email required")
+
+    from sqlalchemy import or_
+    conditions = []
+    if phone:
+        # Normalise: strip spaces/dashes, keep digits and leading +
+        normalised = "+" + "".join(c for c in phone if c.isdigit()) if phone else ""
+        conditions.append(Order.guest_phone == normalised)
+        conditions.append(Order.guest_phone == phone.strip())
+    if email:
+        conditions.append(Order.guest_email == email.strip().lower())
+
+    orders = (
+        await session.execute(
+            select(Order)
+            .options(selectinload(Order.items), selectinload(Order.plan))
+            .where(
+                Order.status.in_([OrderStatus.READY, OrderStatus.DELIVERED]),
+                or_(*conditions),
+            )
+            .order_by(Order.created_at.desc())
+            .limit(20)
+        )
+    ).scalars().all()
+
+    return [_to_out(o) for o in orders]
+
+
+# ── Endpoints ──────────────────────────────────────────────────────────────
 
 @router.post("", response_model=OrderOut, status_code=status.HTTP_201_CREATED)
 async def create_order(

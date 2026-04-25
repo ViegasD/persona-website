@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -164,16 +164,15 @@ async def list_pending_approval(
         )
     ).scalars().all()
 
+    from app.core.settings import get_settings
+    api_base = get_settings().api_base_url.rstrip("/")
+
     result = []
     for item in items:
         order = item.order
         is_multi = len(item.character_ids) > 1
-        # For multi-char: show composite image. For single-char: show video.
-        preview_url: str | None = None
-        if is_multi and item.composite_image_s3_key:
-            preview_url = storage.presigned_get_url(item.composite_image_s3_key, expires_in=3600)
-        elif not is_multi and item.video_s3_key:
-            preview_url = storage.presigned_get_url(item.video_s3_key, expires_in=3600)
+        has_preview = (is_multi and item.composite_image_s3_key) or (not is_multi and item.video_s3_key)
+        preview_url = f"{api_base}/api/v1/admin/items/{item.id}/preview" if has_preview else None
 
         result.append({
             "item_id": item.id,
@@ -189,6 +188,28 @@ async def list_pending_approval(
             "updated_at": item.updated_at,
         })
     return result
+
+
+@router.get("/items/{item_id}/preview")
+async def preview_item(
+    item_id: int,
+    session: AsyncSession = Depends(get_session),
+) -> Response:
+    """Proxy the composite image or video from S3 so the browser never hits MinIO directly."""
+    item = (
+        await session.execute(select(OrderItem).where(OrderItem.id == item_id))
+    ).scalar_one_or_none()
+    if item is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND)
+
+    is_multi = len(item.character_ids) > 1
+    s3_key = item.composite_image_s3_key if is_multi else item.video_s3_key
+    if not s3_key:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="no preview available yet")
+
+    data = storage.download_bytes(s3_key)
+    content_type = "image/png" if is_multi else "video/mp4"
+    return Response(content=data, media_type=content_type)
 
 
 @router.post("/items/{item_id}/approve", status_code=status.HTTP_200_OK)

@@ -79,3 +79,23 @@ def sign_guest_order(order_id: int) -> str:
 def verify_guest_order(token: str, max_age_seconds: int = 60 * 60 * 24 * 30) -> int | None:
     ids = verify_guest_orders(token, max_age_seconds)
     return ids[0] if ids else None
+
+
+# ── Signed media tokens (for browser-safe video/image proxy URLs) ──────────
+
+def _media_serializer() -> URLSafeTimedSerializer:
+    return URLSafeTimedSerializer(get_settings().guest_cookie_secret, salt="media-item")
+
+
+def sign_media_token(item_id: int) -> str:
+    """Return a short-lived signed token for proxying a single order item's media."""
+    return _media_serializer().dumps({"item_id": item_id})
+
+
+def verify_media_token(token: str, max_age_seconds: int = 3600) -> int | None:
+    """Return the item_id encoded in the token, or None if invalid/expired."""
+    try:
+        data = _media_serializer().loads(token, max_age=max_age_seconds)
+        return int(data["item_id"])
+    except (BadSignature, KeyError, ValueError):
+        return None

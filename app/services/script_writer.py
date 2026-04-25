@@ -103,6 +103,75 @@ def _coerce_lines(payload: dict, n: int) -> StructuredScript | None:
     return StructuredScript(character_lines=cleaned, group_line=group)
 
 
+async def _generate_single_character_script(
+    *,
+    character: CharacterSpec,
+    recipient_name: str,
+    recipient_age: str | None,
+    occasion_slug: str | None,
+    user_message: str | None,
+) -> StructuredScript:
+    """Single-character path: ask for one combined speech (no group-line concept)."""
+    occasion = OCCASIONS.get(occasion_slug or "personalizado", "mensagem carinhosa")
+    age_hint = f" ({recipient_age} anos)" if recipient_age else ""
+    descriptor = character.descriptor or "personagem carismático"
+
+    custom_block = ""
+    if user_message:
+        custom_block = (
+            "\n\nMENSAGEM DO CLIENTE (preserve a intenção e palavras-chave):\n"
+            f'"""\n{user_message.strip()}\n"""\n'
+        )
+
+    user_prompt = f"""Escreva a fala de um vídeo cameo curto em português brasileiro para {recipient_name}{age_hint}.
+
+Personagem: {character.name} — {descriptor}
+Ocasião: {occasion}
+
+REGRAS RÍGIDAS:
+- 1 única fala curta, no MÁXIMO {MAX_WORDS_PER_LINE * 2} palavras no total.
+- Comece cumprimentando {recipient_name} pelo nome.
+- Tom alegre, carinhoso, 100% seguro para criança.
+- Use o JEITO DE FALAR do personagem (vocabulário/maneirismo).
+- Sem narração, sem aspas, sem indicações de cena.{custom_block}
+
+Responda em JSON com exatamente este formato:
+{{
+  "speech": "fala completa do personagem"
+}}"""
+
+    messages = [
+        {
+            "role": "system",
+            "content": "You write short, wholesome, kid-safe character cameo lines in Brazilian Portuguese. Always reply with valid JSON matching the requested schema.",
+        },
+        {"role": "user", "content": user_prompt},
+    ]
+
+    for attempt in range(1, MAX_ATTEMPTS + 1):
+        try:
+            payload = await _chat_json(messages)
+            speech = str(payload.get("speech") or "").strip().strip('"').strip("\u201c").strip("\u201d")
+            if speech:
+                # Split roughly in half for line_pt / group_line so prompt_builder
+                # can join them; for single-char the builder concatenates both anyway.
+                words = speech.split()
+                mid = max(1, len(words) // 2)
+                line_pt = " ".join(words[:mid])
+                group_line = " ".join(words[mid:]) or line_pt
+                return StructuredScript(character_lines=[line_pt], group_line=group_line)
+        except Exception:
+            if attempt == MAX_ATTEMPTS:
+                break
+
+    # Fallback
+    occasion_word = OCCASIONS.get(occasion_slug or "personalizado", "carinho")
+    return StructuredScript(
+        character_lines=[f"Oi, {recipient_name}! Que alegria te ver aqui!"],
+        group_line=f"Feliz {occasion_word}, {recipient_name}!",
+    )
+
+
 async def generate_structured_script(
     *,
     characters: list[CharacterSpec],
@@ -119,6 +188,16 @@ async def generate_structured_script(
     n = len(characters)
     if n < 1:
         raise ValueError("at least one character is required")
+
+    # Single-character: use a simpler prompt with no "group line" concept.
+    if n == 1:
+        return await _generate_single_character_script(
+            character=characters[0],
+            recipient_name=recipient_name,
+            recipient_age=recipient_age,
+            occasion_slug=occasion_slug,
+            user_message=user_message,
+        )
 
     occasion = OCCASIONS.get(occasion_slug or "personalizado", "mensagem carinhosa")
     age_hint = f" ({recipient_age} anos)" if recipient_age else ""
@@ -144,7 +223,7 @@ Personagens (na ordem em que aparecem da esquerda para a direita):
 Ocasião: {occasion}
 
 REGRAS RÍGIDAS:
-- Total: {n} fala(s) individual(is) + 1 fala final em grupo.
+- Total: {n} falas individuais + 1 fala final em grupo.
 - CADA fala individual: 1 frase curta, no MÁXIMO {MAX_WORDS_PER_LINE} palavras.
 - Fala em grupo final: 1 frase curta, no MÁXIMO {MAX_WORDS_PER_LINE} palavras, em uníssono.
 - Tudo em português brasileiro, tom alegre, carinhoso, 100% seguro para criança.

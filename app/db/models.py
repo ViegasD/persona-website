@@ -332,7 +332,7 @@ class Delivery(Base):
         ForeignKey(f"{SCHEMA}.order.id", ondelete="CASCADE"), nullable=False, index=True
     )
     channel: Mapped[DeliveryChannel] = mapped_column(
-        Enum(DeliveryChannel, name="delivery_channel", schema=SCHEMA), nullable=False
+        Enum(DeliveryChannel, name="delivery_channel", schema=SCHEMA, values_callable=lambda obj: [e.value for e in obj]), nullable=False
     )
     status: Mapped[DeliveryStatus] = mapped_column(
         Enum(DeliveryStatus, name="delivery_status", schema=SCHEMA),
