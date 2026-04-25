@@ -132,12 +132,15 @@ async def lookup_orders_by_contact(
     if not phone and not email:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="phone or email required")
 
-    from sqlalchemy import or_
+    from sqlalchemy import or_, func as safunc
     conditions = []
     if phone:
-        # Normalise: strip spaces/dashes, keep digits and leading +
-        normalised = "+" + "".join(c for c in phone if c.isdigit()) if phone else ""
-        conditions.append(Order.guest_phone == normalised)
+        # Strip everything except digits for comparison (DB stores various formats)
+        digits_only = "".join(c for c in phone if c.isdigit())
+        # Match by stripping non-digits from the DB column too
+        conditions.append(
+            safunc.regexp_replace(Order.guest_phone, r"[^\d]", "", "g") == digits_only
+        )
         conditions.append(Order.guest_phone == phone.strip())
     if email:
         conditions.append(Order.guest_email == email.strip().lower())
