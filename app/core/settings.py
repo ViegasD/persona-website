@@ -80,9 +80,10 @@ class Settings(BaseSettings):
     evolution_api_key: str | None = Field(None, alias="EVOLUTION_API_KEY")
 
     # --- API cost estimates (micro-USD = 1/1_000_000 USD) ---
-    # Defaults can be overridden via env vars once real prices are known.
-    cost_xai_video_micro_usd: int = Field(70_000, alias="COST_XAI_VIDEO_MICRO_USD")      # $0.07/video
-    cost_kie_composite_micro_usd: int = Field(20_000, alias="COST_KIE_COMPOSITE_MICRO_USD")  # $0.02/image
+    # xAI charges per second of video, rate depends on resolution.
+    cost_xai_hd_per_sec_micro_usd: int = Field(70_000, alias="COST_XAI_HD_PER_SEC_MICRO_USD")   # $0.07/sec (720p+)
+    cost_xai_sd_per_sec_micro_usd: int = Field(50_000, alias="COST_XAI_SD_PER_SEC_MICRO_USD")   # $0.05/sec (480p)
+    cost_kie_composite_micro_usd: int = Field(60_000, alias="COST_KIE_COMPOSITE_MICRO_USD")      # $0.06/image
     evolution_instance_name: str | None = Field(None, alias="EVOLUTION_INSTANCE_NAME")
 
 

@@ -98,11 +98,14 @@ async def _log_api_cost(
 ) -> None:
     """Insert an ApiCostLog row using the configured cost estimate for the provider+operation."""
     s = get_settings()
-    cost_map = {
-        ("xai", "video_generation"): s.cost_xai_video_micro_usd,
-        ("kie", "composite_image"): s.cost_kie_composite_micro_usd,
-    }
-    cost = cost_map.get((provider, operation), 0)
+    if provider == "xai" and operation == "video_generation":
+        is_hd = s.xai_video_resolution != "480p"
+        rate = s.cost_xai_hd_per_sec_micro_usd if is_hd else s.cost_xai_sd_per_sec_micro_usd
+        cost = rate * s.xai_video_duration_seconds
+    elif provider == "kie" and operation == "composite_image":
+        cost = s.cost_kie_composite_micro_usd
+    else:
+        cost = 0
     if cost <= 0:
         return
     try:
