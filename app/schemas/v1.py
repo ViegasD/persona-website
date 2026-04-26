@@ -100,6 +100,7 @@ class OrderFillIn(BaseModel):
     """
     video_slots: list[list[str]] = Field(..., min_length=1, max_length=20)
     custom_message: str | None = Field(None, max_length=400)
+    custom_messages: list[str | None] | None = Field(None, max_length=20)  # per-video override
     quality: Literal["sd", "hd"] = "sd"
 
 

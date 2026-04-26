@@ -375,12 +375,18 @@ async def fill_items(
     await session.flush()
 
     for seq, slot in enumerate(slots, start=1):
+        vi = seq - 1
+        msg = None
+        if payload.custom_messages and vi < len(payload.custom_messages):
+            msg = payload.custom_messages[vi]
+        if msg is None:
+            msg = payload.custom_message
         session.add(
             OrderItem(
                 order_id=order.id,
                 sequence=seq,
                 character_ids=list(slot),
-                custom_message=payload.custom_message,
+                custom_message=msg,
             )
         )
 
