@@ -381,6 +381,14 @@ async def fill_items(
             msg = payload.custom_messages[vi]
         if msg is None:
             msg = payload.custom_message
+        # Encode per-video child info as a JSON prefix so the AI worker can use it
+        child_name = (payload.recipient_names[vi] if payload.recipient_names and vi < len(payload.recipient_names) else None) or None
+        child_age  = (payload.recipient_ages[vi]  if payload.recipient_ages  and vi < len(payload.recipient_ages)  else None) or None
+        child_occ  = (payload.occasion_slugs[vi]  if payload.occasion_slugs  and vi < len(payload.occasion_slugs)  else None) or None
+        if any([child_name, child_age, child_occ]):
+            import json as _json
+            prefix = _json.dumps({"_child": {"name": child_name, "age": child_age, "occ": child_occ}}, ensure_ascii=False)
+            msg = prefix + "\n" + (msg or "")
         session.add(
             OrderItem(
                 order_id=order.id,

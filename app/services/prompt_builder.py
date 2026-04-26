@@ -72,16 +72,6 @@ def _build_shared_header(scene_description: str) -> list[str]:
         "Camera must be completely static and fixed. No zoom, no pan, no reframing, no movement at all."
     )
     parts.append("")
-    parts.append("STRICT ANIMATION RULES:")
-    parts.append("")
-    parts.append("No hand movement at all")
-    parts.append("No arm movement")
-    parts.append("Hands must remain completely still in their original position")
-    parts.append("No waving, no gestures, no pose changes")
-    parts.append(
-        "Only allowed movement: mouth (lip sync), blinking, very subtle head micro-movements"
-    )
-    parts.append("")
     return parts
 
 
@@ -106,7 +96,7 @@ def _build_single_character_prompt(inputs: VideoPromptInputs) -> str:
         f"Timing guidance: all speech must finish before the last 2 seconds to avoid being cut off."
     )
     parts.append("")
-    parts.append("Animation: lips, blinking, minimal facial expression only — no body movement")
+    parts.append("Animation: lips, blinking, natural body and facial expression")
     parts.append(
         "Audio: clear Brazilian Portuguese, natural voice matching the character, accurate lip sync"
     )
@@ -152,7 +142,7 @@ def _build_multi_character_prompt(inputs: VideoPromptInputs) -> str:
     # ── Final group line ──────────────────────────────────────────────
     parts.append(
         "Final moment: all characters speak together, still in the exact same pose, "
-        "no body or hand movement, only synchronized lip movement and subtle facial expression."
+        "synchronized lip movement and natural facial expression."
     )
     parts.append("This final line must start early enough to finish before the video ends.")
     parts.append("All characters say together in sync:")
@@ -162,7 +152,7 @@ def _build_multi_character_prompt(inputs: VideoPromptInputs) -> str:
         "Timing guidance: the final group line must begin before the last 2 seconds to avoid being cut off."
     )
     parts.append("")
-    parts.append("Animation: lips, blinking, minimal facial expression only — no body movement")
+    parts.append("Animation: lips, blinking, natural body and facial expression")
     parts.append(
         "Audio: clear Brazilian Portuguese, natural voices matching the characters, accurate lip sync, no overlap except final line"
     )

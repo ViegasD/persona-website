@@ -102,6 +102,9 @@ class OrderFillIn(BaseModel):
     custom_message: str | None = Field(None, max_length=400)
     custom_messages: list[str | None] | None = Field(None, max_length=20)  # per-video override
     quality: Literal["sd", "hd"] = "sd"
+    recipient_names: list[str | None] | None = Field(None, max_length=20)  # per-video child name
+    recipient_ages: list[str | None] | None = Field(None, max_length=20)   # per-video child age
+    occasion_slugs: list[str | None] | None = Field(None, max_length=20)   # per-video occasion
 
 
 class OrderItemUpdate(BaseModel):

@@ -51,6 +51,33 @@ from app.workers.queue import redis_settings
 # ─────────────────────────── helpers ──────────────────────────────────────
 
 
+def _extract_child_meta(
+    custom_message: str | None,
+) -> tuple[str | None, str | None, str | None, str | None]:
+    """Parse per-video child info JSON prefix injected by fill_items.
+
+    Returns (child_name, child_age, occasion_slug, cleaned_message).
+    If no prefix is present all returned values are None except cleaned_message
+    which equals the original custom_message unchanged.
+    """
+    if not custom_message:
+        return None, None, None, custom_message
+    first_line, _, rest = custom_message.partition("\n")
+    try:
+        data = json.loads(first_line)
+        child = data.get("_child", {})
+        if child:
+            return (
+                child.get("name") or None,
+                child.get("age") or None,
+                child.get("occ") or None,
+                rest.strip() or None,
+            )
+    except (ValueError, KeyError):
+        pass
+    return None, None, None, custom_message
+
+
 def composite_cache_key(
     character_ids: list[str], recipient_name: str | None, occasion_slug: str | None
 ) -> str:
@@ -183,6 +210,12 @@ async def _generate_video_for_item(item_id: int) -> None:
         quality = order.quality
 
     chars = await _load_characters(char_ids)
+
+    # Extract per-video child info from the custom_message JSON prefix (if present)
+    _child_name, _child_age, _child_occ, custom_message = _extract_child_meta(custom_message)
+    if _child_name: recipient_name = _child_name
+    if _child_age:  recipient_age  = _child_age
+    if _child_occ:  occasion_slug  = _child_occ
 
     input_image_url, composite_key = await _resolve_composite_url(
         item, chars,
@@ -363,6 +396,12 @@ async def process_item_phase1(ctx: dict[str, Any], item_id: int) -> None:  # noq
 
         chars = await _load_characters(char_ids)
 
+        # Extract per-video child info from the custom_message JSON prefix (if present)
+        _child_name, _child_age, _child_occ, custom_message = _extract_child_meta(custom_message)
+        if _child_name: recipient_name = _child_name
+        if _child_age:  recipient_age  = _child_age
+        if _child_occ:  occasion_slug  = _child_occ
+
         if is_multi:
             # ── Multi-character: generate composite image only ──────────────
             _input_url, composite_key = await _resolve_composite_url(
@@ -441,6 +480,12 @@ async def generate_video_for_approved_item(ctx: dict[str, Any], item_id: int) ->
             recipient_age = order.recipient_age
             occasion_slug = order.occasion_slug
             quality = order.quality
+
+        # Extract per-video child info from the custom_message JSON prefix (if present)
+        _child_name, _child_age, _child_occ, custom_message = _extract_child_meta(custom_message)
+        if _child_name: recipient_name = _child_name
+        if _child_age:  recipient_age  = _child_age
+        if _child_occ:  occasion_slug  = _child_occ
 
         if not has_video:
             # Multi-char: composite exists, need to generate video now
