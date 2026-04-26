@@ -1,12 +1,12 @@
 """arq worker that runs cameo order processing.
 
-New per-item pipeline (two-phase with admin approval):
+New per-item pipeline (two-phase, auto-approved):
 
 Phase 1 — triggered immediately on payment:
-  • Multi-character item: generate composite image via kie.ai → AWAITING_APPROVAL
-  • Single-character item: generate video via xAI Grok → AWAITING_APPROVAL
+  • Multi-character item: generate composite image via kie.ai → enqueue phase 2
+  • Single-character item: generate video via xAI Grok → enqueue phase 2
 
-Phase 2 — triggered by admin approval:
+Phase 2 — triggered automatically after phase 1 (no manual approval needed):
   • Multi-character item (has composite, no video): generate video → READY → deliver
   • Single-character item (already has video): mark READY → deliver
 
@@ -376,8 +376,11 @@ async def process_item_phase1(ctx: dict[str, Any], item_id: int) -> None:  # noq
                 ).scalar_one()
                 if composite_key:
                     item.composite_image_s3_key = composite_key
-                item.status = OrderItemStatus.AWAITING_APPROVAL
+                item.status = OrderItemStatus.COMPOSITING
                 await session.commit()
+            # Auto-approve: immediately enqueue phase 2 (video generation)
+            from app.workers.queue import enqueue_generate_video
+            await enqueue_generate_video(item_id)
         else:
             # ── Single-character: generate video directly ───────────────────
             input_image_url, _composite_key = await _resolve_composite_url(
@@ -395,12 +398,9 @@ async def process_item_phase1(ctx: dict[str, Any], item_id: int) -> None:  # noq
                 custom_message=custom_message,
                 quality=quality,
             )
-            async with session_scope() as session:
-                item = (
-                    await session.execute(select(OrderItem).where(OrderItem.id == item_id))
-                ).scalar_one()
-                item.status = OrderItemStatus.AWAITING_APPROVAL
-                await session.commit()
+            # Auto-approve: immediately enqueue phase 2 (mark READY + deliver)
+            from app.workers.queue import enqueue_generate_video
+            await enqueue_generate_video(item_id)
 
     except Exception as exc:  # noqa: BLE001
         async with session_scope() as session:
