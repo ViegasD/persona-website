@@ -82,6 +82,51 @@ async def create_pix_payment(
     }
 
 
+async def create_card_payment(
+    *,
+    order_id: int,
+    amount_cents: int,
+    description: str,
+    notification_url: str,
+    card_token: str,
+    installments: int = 1,
+    payment_method_id: str,  # e.g. "visa", "master", "elo", "debvisa", "debmaster"
+    payer_email: str | None = None,
+    payer_doc_type: str | None = None,  # "CPF" or "CNPJ"
+    payer_doc_number: str | None = None,
+) -> dict[str, Any]:
+    """Create a credit/debit card payment and return ``{payment_id, status, status_detail, ticket_url}``."""
+    body: dict[str, Any] = {
+        "transaction_amount": round(amount_cents / 100, 2),
+        "token": card_token,
+        "description": description,
+        "installments": installments,
+        "payment_method_id": payment_method_id,
+        "external_reference": make_external_reference(order_id),
+        "notification_url": notification_url,
+        "payer": {"email": payer_email or "cliente@persona.com.br"},
+    }
+    if payer_doc_type and payer_doc_number:
+        body["payer"]["identification"] = {"type": payer_doc_type, "number": payer_doc_number}
+
+    def _create() -> dict[str, Any]:
+        return _sdk().payment().create(body)
+
+    response = await asyncio.to_thread(_create)
+    http_status = response.get("status")
+    payment = response.get("response", {})
+    payment_id = payment.get("id")
+    if not payment_id or (isinstance(http_status, int) and http_status >= 400):
+        error_msg = payment.get("message") or payment.get("error") or f"MercadoPago error (HTTP {http_status})"
+        raise RuntimeError(f"MercadoPago card payment failed: {error_msg}")
+    return {
+        "payment_id": str(payment_id),
+        "status": payment.get("status", ""),
+        "status_detail": payment.get("status_detail", ""),
+        "ticket_url": (payment.get("transaction_details") or {}).get("external_resource_url") or None,
+    }
+
+
 async def get_payment_details(payment_id: str) -> dict[str, Any]:
     def _get() -> dict[str, Any]:
         return _sdk().payment().get(payment_id)

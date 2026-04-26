@@ -162,12 +162,25 @@ class OrderOut(BaseModel):
 class OrderCheckoutOut(BaseModel):
     order_id: int
     payment_id: int
-    qr_code_payload: str
+    payment_method: str = "pix"  # "pix" | "credit_card" | "debit_card"
+    # PIX fields
+    qr_code_payload: str = ""
     qr_code_base64: str | None = None  # inline PNG as base64; use as <img src="data:image/png;base64,...">
-    qr_code_url: str
+    qr_code_url: str = ""
     ticket_url: str | None
     expires_at: datetime | None
     amount_cents: int
+    # Card fields
+    card_status: str | None = None         # "approved", "in_process", "rejected"
+    card_status_detail: str | None = None
+
+
+class CardCheckoutIn(BaseModel):
+    card_token: str
+    payment_method_id: str           # "visa", "master", "elo", "debvisa", "debmaster", etc.
+    installments: int = Field(default=1, ge=1, le=12)
+    payer_doc_type: str | None = None  # "CPF"
+    payer_doc_number: str | None = None
 
 
 # ── Auth ───────────────────────────────────────────────────────────────────

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import cast
 
 from fastapi import APIRouter, Cookie, Depends, Header, HTTPException, Response, status
@@ -22,6 +23,7 @@ from app.db.models import (
 )
 from app.db.session import get_session
 from app.schemas.v1 import (
+    CardCheckoutIn,
     OrderCheckoutOut,
     OrderCreate,
     OrderFillIn,
@@ -390,6 +392,7 @@ async def fill_items(
 @router.post("/{order_id}/checkout", response_model=OrderCheckoutOut)
 async def checkout(
     order_id: int,
+    card: CardCheckoutIn | None = None,
     user_id: int | None = Depends(get_current_user_id),
     guest_order_ids: list[int] = Depends(get_guest_order_ids),
     x_guest_token: str | None = Header(default=None, alias="X-Guest-Token"),
@@ -433,6 +436,53 @@ async def checkout(
             await session.flush()
 
     notification_url = f"{settings.api_base_url.rstrip('/')}/api/v1/payments/mercadopago/webhook"
+
+    # ── Card payment (credit or debit) ──────────────────────────────────────
+    if card is not None:
+        card_result = await mercadopago_client.create_card_payment(
+            order_id=order.id,
+            amount_cents=order.total_cents,
+            description=f"Persona — pedido #{order.id}",
+            notification_url=notification_url,
+            card_token=card.card_token,
+            installments=card.installments,
+            payment_method_id=card.payment_method_id,
+            payer_email=order.guest_email,
+            payer_doc_type=card.payer_doc_type,
+            payer_doc_number=card.payer_doc_number,
+        )
+        payment_type = "debit_card" if card.payment_method_id.startswith("deb") else "credit_card"
+        payment = Payment(
+            order_id=order.id,
+            provider="mercadopago",
+            provider_id=card_result["payment_id"],
+            status=PaymentStatus.PENDING,
+            amount_cents=order.total_cents,
+            qr_code_payload=None,
+            qr_code_s3_key=None,
+            ticket_url=card_result.get("ticket_url"),
+            expires_at=None,
+        )
+        session.add(payment)
+        order.status = OrderStatus.AWAITING_PAYMENT
+        # If immediately approved, mark paid
+        if card_result["status"] == "approved":
+            order.status = OrderStatus.PAID
+            order.paid_at = datetime.now(UTC)
+        await session.commit()
+        await session.refresh(payment)
+        return OrderCheckoutOut(
+            order_id=order.id,
+            payment_id=payment.id,
+            payment_method=payment_type,
+            ticket_url=card_result.get("ticket_url"),
+            expires_at=None,
+            amount_cents=order.total_cents,
+            card_status=card_result["status"],
+            card_status_detail=card_result["status_detail"],
+        )
+
+    # ── PIX payment ──────────────────────────────────────────────────────────
     pix = await mercadopago_client.create_pix_payment(
         order_id=order.id,
         amount_cents=order.total_cents,
@@ -460,6 +510,7 @@ async def checkout(
     return OrderCheckoutOut(
         order_id=order.id,
         payment_id=payment.id,
+        payment_method="pix",
         qr_code_payload=pix["qr_code"],
         qr_code_base64=pix["qr_code_base64"] or None,
         qr_code_url="",

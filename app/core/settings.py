@@ -41,6 +41,7 @@ class Settings(BaseSettings):
 
     # --- Mercado Pago (shared account; external_reference prefixed "web_") ---
     mercadopago_access_token: str = Field(..., alias="MERCADOPAGO_ACCESS_TOKEN")
+    mercadopago_public_key: str | None = Field(None, alias="MERCADOPAGO_PUBLIC_KEY")
     mercadopago_webhook_secret: str | None = Field(None, alias="MERCADOPAGO_WEBHOOK_SECRET")
 
     # --- OpenAI (script writer; mirrors Node backend) ---
