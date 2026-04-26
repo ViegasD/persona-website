@@ -78,6 +78,11 @@ class Settings(BaseSettings):
     # --- WhatsApp delivery via Evolution API ---
     evolution_api_url: str | None = Field(None, alias="EVOLUTION_API_URL")
     evolution_api_key: str | None = Field(None, alias="EVOLUTION_API_KEY")
+
+    # --- API cost estimates (micro-USD = 1/1_000_000 USD) ---
+    # Defaults can be overridden via env vars once real prices are known.
+    cost_xai_video_micro_usd: int = Field(70_000, alias="COST_XAI_VIDEO_MICRO_USD")      # $0.07/video
+    cost_kie_composite_micro_usd: int = Field(20_000, alias="COST_KIE_COMPOSITE_MICRO_USD")  # $0.02/image
     evolution_instance_name: str | None = Field(None, alias="EVOLUTION_INSTANCE_NAME")
 
 

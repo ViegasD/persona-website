@@ -407,6 +407,26 @@ class CompositeFrameCache(Base):
     )
 
 
+class ApiCostLog(Base):
+    """Records the cost (in micro-USD, i.e. 1/1_000_000 of a USD) of each
+    external API call so the admin dashboard can track spend per provider."""
+
+    __tablename__ = "api_cost_log"
+    __table_args__ = (Index("ix_api_cost_log_order_item_id", "order_item_id"),)
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    order_item_id: Mapped[int | None] = mapped_column(
+        ForeignKey(f"{SCHEMA}.order_item.id", ondelete="SET NULL"), nullable=True
+    )
+    provider: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    # e.g. "video_generation", "composite_image"
+    operation: Mapped[str] = mapped_column(String(64), nullable=False)
+    cost_micro_usd: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False, index=True
+    )
+
+
 __all__ = [
     "Base",
     "User",
@@ -420,6 +440,7 @@ __all__ = [
     "Subscription",
     "UpsellEvent",
     "CompositeFrameCache",
+    "ApiCostLog",
     "PersonalizationLevel",
     "OrderStatus",
     "OrderItemStatus",

@@ -32,6 +32,7 @@ from app.db.models import (
     Batch,
     BatchItem,
     BatchStatus,
+    ApiCostLog,
     CompositeFrameCache,
     Order,
     OrderItem,
@@ -90,6 +91,31 @@ def composite_cache_key(
         sort_keys=True,
     )
     return hashlib.sha256(payload.encode()).hexdigest()
+
+
+async def _log_api_cost(
+    provider: str, operation: str, order_item_id: int | None = None
+) -> None:
+    """Insert an ApiCostLog row using the configured cost estimate for the provider+operation."""
+    s = get_settings()
+    cost_map = {
+        ("xai", "video_generation"): s.cost_xai_video_micro_usd,
+        ("kie", "composite_image"): s.cost_kie_composite_micro_usd,
+    }
+    cost = cost_map.get((provider, operation), 0)
+    if cost <= 0:
+        return
+    try:
+        async with session_scope() as session:
+            session.add(ApiCostLog(
+                order_item_id=order_item_id,
+                provider=provider,
+                operation=operation,
+                cost_micro_usd=cost,
+            ))
+            await session.commit()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Failed to log API cost: {exc}", exc=exc)
 
 
 async def _load_characters(character_slugs: list[str]) -> list[dict[str, Any]]:
@@ -170,6 +196,7 @@ async def _resolve_composite_url(
         image_size="9:16",
         output_format="PNG",
     )
+    await _log_api_cost("kie", "composite_image", item.id)
     payload = await kie_client.wait_for_task(task_id)
     composite_url = kie_client.extract_first_image_url(payload)
 
@@ -614,6 +641,7 @@ async def _generate_and_store_video(
         aspect_ratio=settings.xai_video_aspect_ratio,
         resolution="720p" if quality == "hd" else "480p",
     )
+    await _log_api_cost("xai", "video_generation", item_id)
     result = await xai_client.wait_for_video(request_id)
     video_info = result.get("video") or {}
     video_url = video_info.get("url")

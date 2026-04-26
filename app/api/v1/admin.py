@@ -2,16 +2,17 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
-from sqlalchemy import desc, select
+from sqlalchemy import desc, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.api.deps import require_admin_key
 from app.core.security import sign_media_token
 from app.db.models import (
+    ApiCostLog,
     Batch,
     BatchStatus,
     BatchTrigger,
@@ -331,3 +332,170 @@ async def cancel_batch(batch_id: int, session: AsyncSession = Depends(get_sessio
     batch.error = "cancelled by admin"
     batch.finished_at = datetime.now(UTC)
     await session.commit()
+
+
+# ── Dashboard summary ──────────────────────────────────────────────────────
+
+
+@router.get("/dashboard/summary")
+async def dashboard_summary(session: AsyncSession = Depends(get_session)) -> dict:
+    """Aggregate KPIs for the admin dashboard:
+    - Revenue (total paid, today, this week, this month)
+    - Order counts by status
+    - API cost totals (all-time, today, this week, this month)
+    - Conversion funnel (drafts vs awaiting_payment vs paid)
+    """
+    now = datetime.now(UTC)
+    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    week_start = today_start - timedelta(days=today_start.weekday())
+    month_start = today_start.replace(day=1)
+
+    # ── Revenue ────────────────────────────────────────────────────────────
+    paid_statuses = {
+        OrderStatus.PAID, OrderStatus.QUEUED, OrderStatus.GENERATING,
+        OrderStatus.READY, OrderStatus.DELIVERED,
+    }
+
+    async def _revenue(since: datetime | None = None) -> int:
+        stmt = select(func.coalesce(func.sum(Order.total_cents), 0)).where(
+            Order.status.in_(paid_statuses)
+        )
+        if since:
+            stmt = stmt.where(Order.paid_at >= since)
+        return (await session.execute(stmt)).scalar_one()
+
+    revenue_total = await _revenue()
+    revenue_today = await _revenue(today_start)
+    revenue_week = await _revenue(week_start)
+    revenue_month = await _revenue(month_start)
+
+    # ── Order counts ───────────────────────────────────────────────────────
+    counts_rows = (
+        await session.execute(
+            select(Order.status, func.count(Order.id))
+            .group_by(Order.status)
+        )
+    ).all()
+    order_counts = {row[0].value: row[1] for row in counts_rows}
+
+    # ── API costs ──────────────────────────────────────────────────────────
+    async def _costs(since: datetime | None = None) -> dict[str, int]:
+        stmt = select(
+            ApiCostLog.provider,
+            func.coalesce(func.sum(ApiCostLog.cost_micro_usd), 0),
+        ).group_by(ApiCostLog.provider)
+        if since:
+            stmt = stmt.where(ApiCostLog.created_at >= since)
+        rows = (await session.execute(stmt)).all()
+        return {row[0]: row[1] for row in rows}
+
+    costs_total = await _costs()
+    costs_today = await _costs(today_start)
+    costs_week = await _costs(week_start)
+    costs_month = await _costs(month_start)
+
+    total_paid_orders = sum(
+        order_counts.get(s.value, 0) for s in paid_statuses
+    )
+    total_orders = sum(order_counts.values())
+
+    return {
+        "revenue_cents": {
+            "total": revenue_total,
+            "today": revenue_today,
+            "week": revenue_week,
+            "month": revenue_month,
+        },
+        "order_counts": order_counts,
+        "conversion": {
+            "total_orders": total_orders,
+            "paid_orders": total_paid_orders,
+            "rate_pct": round(100 * total_paid_orders / total_orders, 1) if total_orders else 0,
+        },
+        "api_cost_micro_usd": {
+            "total": costs_total,
+            "today": costs_today,
+            "week": costs_week,
+            "month": costs_month,
+        },
+    }
+
+
+@router.get("/dashboard/orders")
+async def dashboard_orders(
+    status_filter: OrderStatus | None = Query(None, alias="status"),
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """Paginated orders list with plan and item info for the purchases page."""
+    stmt = (
+        select(Order)
+        .options(selectinload(Order.plan), selectinload(Order.items))
+        .order_by(desc(Order.created_at))
+        .limit(limit)
+        .offset(offset)
+    )
+    if status_filter is not None:
+        stmt = stmt.where(Order.status == status_filter)
+
+    count_stmt = select(func.count(Order.id))
+    if status_filter is not None:
+        count_stmt = count_stmt.where(Order.status == status_filter)
+
+    orders, total = await session.execute(stmt), (await session.execute(count_stmt)).scalar_one()
+    orders = orders.scalars().all()
+
+    return {
+        "total": total,
+        "items": [
+            {
+                "id": o.id,
+                "status": o.status.value,
+                "plan": o.plan.name if o.plan else None,
+                "plan_slug": o.plan.slug if o.plan else None,
+                "guest_phone": o.guest_phone,
+                "guest_email": o.guest_email,
+                "recipient_name": o.recipient_name,
+                "total_cents": o.total_cents,
+                "quality": o.quality,
+                "video_count": len(o.items),
+                "created_at": o.created_at,
+                "paid_at": o.paid_at,
+                "delivered_at": o.delivered_at,
+                "error": o.error,
+            }
+            for o in orders
+        ],
+    }
+
+
+@router.get("/dashboard/api-costs")
+async def dashboard_api_costs(
+    days: int = Query(30, ge=1, le=365),
+    session: AsyncSession = Depends(get_session),
+) -> list[dict]:
+    """Daily API cost breakdown by provider for the last N days."""
+    since = datetime.now(UTC) - timedelta(days=days)
+    rows = (
+        await session.execute(
+            select(
+                func.date_trunc("day", ApiCostLog.created_at).label("day"),
+                ApiCostLog.provider,
+                func.sum(ApiCostLog.cost_micro_usd).label("cost"),
+                func.count(ApiCostLog.id).label("calls"),
+            )
+            .where(ApiCostLog.created_at >= since)
+            .group_by("day", ApiCostLog.provider)
+            .order_by("day", ApiCostLog.provider)
+        )
+    ).all()
+    return [
+        {
+            "day": row.day.date().isoformat(),
+            "provider": row.provider,
+            "cost_micro_usd": row.cost,
+            "calls": row.calls,
+        }
+        for row in rows
+    ]
