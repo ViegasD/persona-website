@@ -188,6 +188,13 @@ async def create_order(
         guest_phone=payload.guest_phone,
         total_cents=plan.price_cents,
         status=OrderStatus.DRAFT,
+        utm_source=payload.utm_source,
+        utm_medium=payload.utm_medium,
+        utm_campaign=payload.utm_campaign,
+        utm_content=payload.utm_content,
+        utm_term=payload.utm_term,
+        utm_sck=payload.utm_sck,
+        utm_src=payload.utm_src,
     )
     session.add(order)
     await session.flush()

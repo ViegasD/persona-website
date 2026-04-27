@@ -79,6 +79,9 @@ class Settings(BaseSettings):
     evolution_api_url: str | None = Field(None, alias="EVOLUTION_API_URL")
     evolution_api_key: str | None = Field(None, alias="EVOLUTION_API_KEY")
 
+    # --- UTMify ---
+    utmify_api_token: str | None = Field(None, alias="UTMIFY_API_TOKEN")
+
     # --- API cost estimates (micro-USD = 1/1_000_000 USD) ---
     # xAI charges per second of video, rate depends on resolution.
     cost_xai_hd_per_sec_micro_usd: int = Field(70_000, alias="COST_XAI_HD_PER_SEC_MICRO_USD")   # $0.07/sec (720p+)

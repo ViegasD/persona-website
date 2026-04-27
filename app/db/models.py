@@ -186,6 +186,14 @@ class Order(Base):
     total_cents: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     quality: Mapped[str] = mapped_column(String(8), default="sd", nullable=False, server_default="sd")
 
+    utm_source: Mapped[str | None] = mapped_column(String(128))
+    utm_medium: Mapped[str | None] = mapped_column(String(128))
+    utm_campaign: Mapped[str | None] = mapped_column(String(256))
+    utm_content: Mapped[str | None] = mapped_column(String(256))
+    utm_term: Mapped[str | None] = mapped_column(String(256))
+    utm_sck: Mapped[str | None] = mapped_column(String(256))
+    utm_src: Mapped[str | None] = mapped_column(String(256))
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False, index=True
     )

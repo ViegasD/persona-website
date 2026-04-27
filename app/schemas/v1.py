@@ -131,6 +131,13 @@ class OrderCreate(BaseModel):
     occasion_slug: str | None = Field(None, max_length=64)
     guest_email: EmailStr | None = None
     guest_phone: str | None = Field(None, max_length=32)
+    utm_source: str | None = Field(None, max_length=128)
+    utm_medium: str | None = Field(None, max_length=128)
+    utm_campaign: str | None = Field(None, max_length=256)
+    utm_content: str | None = Field(None, max_length=256)
+    utm_term: str | None = Field(None, max_length=256)
+    utm_sck: str | None = Field(None, max_length=256)
+    utm_src: str | None = Field(None, max_length=256)
 
 
 class OrderUpdate(BaseModel):
@@ -154,6 +161,13 @@ class OrderOut(BaseModel):
     guest_phone: str | None
     total_cents: int
     quality: str
+    utm_source: str | None
+    utm_medium: str | None
+    utm_campaign: str | None
+    utm_content: str | None
+    utm_term: str | None
+    utm_sck: str | None
+    utm_src: str | None
     items: list[OrderItemOut]
     created_at: datetime
     paid_at: datetime | None
