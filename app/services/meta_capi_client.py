@@ -44,24 +44,64 @@ async def report_purchase(
     event_time: int | None = None,
 ) -> None:
     """Send a Purchase event to Meta via Stape CAPIG (server-side CAPI)."""
+    await _send_event(
+        event_name="Purchase",
+        event_id=f"purchase_{order_id}",
+        email=email,
+        phone=phone,
+        event_time=event_time,
+        custom_data={
+            "currency": "BRL",
+            "value": round(amount_cents / 100, 2),
+        },
+    )
+    logger.info("Meta CAPI Purchase reported for order %s", order_id)
+
+
+async def report_initiate_checkout(
+    *,
+    order_id: int,
+    amount_cents: int,
+    email: str | None,
+    phone: str | None,
+) -> None:
+    """Send an InitiateCheckout event to Meta via Stape CAPIG."""
+    await _send_event(
+        event_name="InitiateCheckout",
+        event_id=f"initiate_checkout_{order_id}",
+        email=email,
+        phone=phone,
+        custom_data={
+            "currency": "BRL",
+            "value": round(amount_cents / 100, 2),
+        },
+    )
+    logger.info("Meta CAPI InitiateCheckout reported for order %s", order_id)
+
+
+async def _send_event(
+    *,
+    event_name: str,
+    event_id: str,
+    email: str | None,
+    phone: str | None,
+    event_time: int | None = None,
+    custom_data: dict | None = None,
+) -> None:
     settings = get_settings()
 
     url = settings.stape_capig_url
     identifier = settings.stape_capig_identifier
     api_key = settings.stape_capig_api_key
-    pixel_id = settings.meta_pixel_id
 
-    if not all([url, identifier, api_key, pixel_id]):
-        logger.debug("Stape CAPIG not configured — skipping Meta CAPI report")
+    if not all([url, identifier, api_key]):
+        logger.debug("Stape CAPIG not configured — skipping %s", event_name)
         return
-
-    # Deterministic event_id — matches the browser pixel's eventID
-    event_id = f"purchase_{order_id}"
 
     payload = {
         "data": [
             {
-                "event_name": "Purchase",
+                "event_name": event_name,
                 "event_time": event_time or int(time.time()),
                 "event_id": event_id,
                 "action_source": "website",
@@ -70,10 +110,7 @@ async def report_purchase(
                     **({"ph": [_hash_phone(phone)]} if phone else {}),
                     "country": ["br"],
                 },
-                "custom_data": {
-                    "currency": "BRL",
-                    "value": round(amount_cents / 100, 2),
-                },
+                **({"custom_data": custom_data} if custom_data else {}),
             }
         ]
     }
@@ -92,10 +129,8 @@ async def report_purchase(
             )
         if resp.status_code >= 400:
             logger.warning(
-                "Meta CAPI report failed for order %s: %s %s",
-                order_id, resp.status_code, resp.text[:300],
+                "Meta CAPI %s failed (event_id=%s): %s %s",
+                event_name, event_id, resp.status_code, resp.text[:300],
             )
-        else:
-            logger.info("Meta CAPI Purchase reported for order %s (event_id=%s)", order_id, event_id)
     except Exception:  # noqa: BLE001
-        logger.exception("Meta CAPI report error for order %s", order_id)
+        logger.exception("Meta CAPI %s error (event_id=%s)", event_name, event_id)

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime
 from typing import cast
 
@@ -13,6 +14,7 @@ from sqlalchemy.orm import selectinload
 from app.api.deps import GUEST_COOKIE_NAME, get_current_user_id, get_guest_order_ids
 from app.core.security import sign_guest_orders, sign_media_token, verify_guest_orders
 from app.core.settings import get_settings
+from app.services.meta_capi_client import report_initiate_checkout
 from app.db.models import (
     Order,
     OrderItem,
@@ -216,6 +218,15 @@ async def create_order(
 
     await session.commit()
     await session.refresh(order, attribute_names=["items", "plan", "quality"])
+
+    # Fire InitiateCheckout to Meta CAPI (fire-and-forget)
+    asyncio.create_task(report_initiate_checkout(
+        order_id=order.id,
+        amount_cents=order.total_cents,
+        email=order.guest_email,
+        phone=order.guest_phone,
+    ))
+
     # guest_token is also returned in the response body so the frontend can
     # pass it back as X-Guest-Token on fill/checkout — avoids third-party
     # cookie issues when the storefront HTML is on a different origin.
