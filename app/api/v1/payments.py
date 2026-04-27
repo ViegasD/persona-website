@@ -13,6 +13,7 @@ from app.core.settings import get_settings
 from app.db.models import Order, OrderItem, OrderStatus, Payment, PaymentStatus
 from app.db.session import get_session
 from app.services import mercadopago_client
+from app.services.meta_capi_client import report_purchase
 from app.services.utmify_client import report_sale
 from app.workers.queue import enqueue_process_item
 
@@ -110,6 +111,15 @@ async def mercadopago_webhook(
                 utm_term=order.utm_term,
                 utm_sck=order.utm_sck,
                 utm_src=order.utm_src,
+            ))
+
+            # Report Purchase to Meta via Stape CAPIG (server-side CAPI)
+            asyncio.create_task(report_purchase(
+                order_id=order.id,
+                amount_cents=payment.amount_cents,
+                email=order.guest_email,
+                phone=order.guest_phone,
+                event_time=int(order.paid_at.timestamp()),
             ))
 
             return {"received": True}

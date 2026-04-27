@@ -82,6 +82,12 @@ class Settings(BaseSettings):
     # --- UTMify ---
     utmify_api_token: str | None = Field(None, alias="UTMIFY_API_TOKEN")
 
+    # --- Meta Conversions API via Stape CAPIG ---
+    meta_pixel_id: str | None = Field(None, alias="META_PIXEL_ID")
+    stape_capig_url: str | None = Field(None, alias="STAPE_CAPIG_URL")
+    stape_capig_identifier: str | None = Field(None, alias="STAPE_CAPIG_IDENTIFIER")
+    stape_capig_api_key: str | None = Field(None, alias="STAPE_CAPIG_API_KEY")
+
     # --- API cost estimates (micro-USD = 1/1_000_000 USD) ---
     # xAI charges per second of video, rate depends on resolution.
     cost_xai_hd_per_sec_micro_usd: int = Field(70_000, alias="COST_XAI_HD_PER_SEC_MICRO_USD")   # $0.07/sec (720p+)
