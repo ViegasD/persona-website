@@ -79,9 +79,6 @@ class Settings(BaseSettings):
     evolution_api_url: str | None = Field(None, alias="EVOLUTION_API_URL")
     evolution_api_key: str | None = Field(None, alias="EVOLUTION_API_KEY")
 
-    # --- UTMify ---
-    utmify_api_token: str | None = Field(None, alias="UTMIFY_API_TOKEN")
-
     # --- Meta Conversions API via Stape CAPIG ---
     meta_pixel_id: str | None = Field(None, alias="META_PIXEL_ID")
     stape_capig_url: str | None = Field(None, alias="STAPE_CAPIG_URL")

@@ -14,7 +14,6 @@ from app.db.models import Order, OrderItem, OrderStatus, Payment, PaymentStatus
 from app.db.session import get_session
 from app.services import mercadopago_client
 from app.services.meta_capi_client import report_purchase
-from app.services.utmify_client import report_sale
 from app.workers.queue import enqueue_process_item
 
 router = APIRouter(prefix="/payments", tags=["payments"])
@@ -89,29 +88,6 @@ async def mercadopago_webhook(
             await session.commit()
             for item_id in item_ids:
                 await enqueue_process_item(item_id)
-
-            # Report sale to UTMify (fire-and-forget, never blocks payment flow)
-            from app.db.models import Plan  # local import to avoid circulars
-            plan = (await session.execute(select(Plan).where(Plan.id == order.plan_id))).scalar_one_or_none()
-            asyncio.create_task(report_sale(
-                order_id=order.id,
-                amount_cents=payment.amount_cents,
-                paid_at=order.paid_at,
-                created_at=order.created_at,
-                payment_method=details.get("payment_type_id") or "pix",
-                customer_name=order.recipient_name,
-                customer_email=order.guest_email,
-                customer_phone=order.guest_phone,
-                plan_slug=plan.slug if plan else str(order.plan_id),
-                plan_name=plan.name if plan else str(order.plan_id),
-                utm_source=order.utm_source,
-                utm_medium=order.utm_medium,
-                utm_campaign=order.utm_campaign,
-                utm_content=order.utm_content,
-                utm_term=order.utm_term,
-                utm_sck=order.utm_sck,
-                utm_src=order.utm_src,
-            ))
 
             # Report Purchase to Meta via Stape CAPIG (server-side CAPI)
             asyncio.create_task(report_purchase(
