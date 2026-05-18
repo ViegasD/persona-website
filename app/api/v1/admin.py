@@ -98,6 +98,41 @@ async def list_orders(
     return [_to_out(o) for o in orders]
 
 
+@router.post("/orders/{order_id}/reprocess", status_code=status.HTTP_200_OK)
+async def reprocess_order(order_id: int, session: AsyncSession = Depends(get_session)) -> dict:
+    """Re-enqueue all PENDING/FAILED items for a PAID order that got stuck (e.g. webhook race)."""
+    order = (
+        await session.execute(
+            select(Order).options(selectinload(Order.items)).where(Order.id == order_id)
+        )
+    ).scalar_one_or_none()
+    if order is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND)
+    if order.status not in {OrderStatus.PAID, OrderStatus.QUEUED}:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            detail=f"order is {order.status.value}, expected PAID or QUEUED",
+        )
+
+    from app.workers.queue import enqueue_process_item
+
+    enqueued = []
+    errors = []
+    for item in order.items:
+        if item.status in {OrderItemStatus.PENDING, OrderItemStatus.FAILED}:
+            item.status = OrderItemStatus.PENDING
+            item.error = None
+            try:
+                await session.flush()
+                await enqueue_process_item(item.id)
+                enqueued.append(item.id)
+            except Exception as exc:
+                errors.append({"item_id": item.id, "error": str(exc)})
+
+    await session.commit()
+    return {"order_id": order_id, "enqueued": enqueued, "errors": errors}
+
+
 @router.post("/orders/{order_id}/refund", status_code=status.HTTP_204_NO_CONTENT)
 async def refund_order(order_id: int, session: AsyncSession = Depends(get_session)) -> None:
     order = (await session.execute(select(Order).where(Order.id == order_id))).scalar_one_or_none()
