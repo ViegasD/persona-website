@@ -100,7 +100,7 @@ async def list_orders(
 
 @router.post("/orders/{order_id}/reprocess", status_code=status.HTTP_200_OK)
 async def reprocess_order(order_id: int, session: AsyncSession = Depends(get_session)) -> dict:
-    """Re-enqueue all PENDING/FAILED items for a PAID order that got stuck (e.g. webhook race)."""
+    """Re-enqueue stuck items OR advance order status if all items are already READY."""
     order = (
         await session.execute(
             select(Order).options(selectinload(Order.items)).where(Order.id == order_id)
@@ -113,6 +113,12 @@ async def reprocess_order(order_id: int, session: AsyncSession = Depends(get_ses
             status.HTTP_409_CONFLICT,
             detail=f"order is {order.status.value}, expected PAID or QUEUED",
         )
+
+    # If all items are already READY, the order just needs its status advanced.
+    if order.items and all(i.status == OrderItemStatus.READY for i in order.items):
+        order.status = OrderStatus.READY
+        await session.commit()
+        return {"order_id": order_id, "action": "marked_ready", "enqueued": [], "errors": []}
 
     from app.workers.queue import enqueue_process_item
 
@@ -130,7 +136,7 @@ async def reprocess_order(order_id: int, session: AsyncSession = Depends(get_ses
                 errors.append({"item_id": item.id, "error": str(exc)})
 
     await session.commit()
-    return {"order_id": order_id, "enqueued": enqueued, "errors": errors}
+    return {"order_id": order_id, "action": "requeued", "enqueued": enqueued, "errors": errors}
 
 
 @router.post("/orders/{order_id}/refund", status_code=status.HTTP_204_NO_CONTENT)
