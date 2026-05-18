@@ -42,9 +42,14 @@ async def proxy_media(token: str) -> Response:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="media not ready")
 
     data = storage.download_bytes(s3_key)
-    content_type = "video/mp4" if item.video_s3_key else "image/png"
+    is_video = bool(item.video_s3_key)
+    content_type = "video/mp4" if is_video else "image/png"
+    ext = "mp4" if is_video else "png"
     return Response(
         content=data,
         media_type=content_type,
-        headers={"Cache-Control": "private, max-age=3600"},
+        headers={
+            "Cache-Control": "private, max-age=3600",
+            "Content-Disposition": f'attachment; filename="video_{item_id}.{ext}"',
+        },
     )
