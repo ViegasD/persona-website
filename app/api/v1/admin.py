@@ -487,6 +487,20 @@ async def dashboard_orders(
     orders, total = await session.execute(stmt), (await session.execute(count_stmt)).scalar_one()
     orders = orders.scalars().all()
 
+    # Bulk-load affiliate codes for orders that have an affiliate_id
+    affiliate_ids = {o.affiliate_id for o in orders if o.affiliate_id is not None}
+    affiliate_code_map: dict[int, str] = {}
+    if affiliate_ids:
+        from app.db.models import Affiliate
+        rows = (
+            await session.execute(
+                select(Affiliate.id, Affiliate.code).where(
+                    Affiliate.id.in_(list(affiliate_ids))
+                )
+            )
+        ).all()
+        affiliate_code_map = {row.id: row.code for row in rows}
+
     return {
         "total": total,
         "items": [
@@ -501,6 +515,8 @@ async def dashboard_orders(
                 "total_cents": o.total_cents,
                 "quality": o.quality,
                 "video_count": len(o.items),
+                "affiliate_id": o.affiliate_id,
+                "affiliate_code": affiliate_code_map.get(o.affiliate_id) if o.affiliate_id else None,
                 "created_at": o.created_at,
                 "paid_at": o.paid_at,
                 "delivered_at": o.delivered_at,

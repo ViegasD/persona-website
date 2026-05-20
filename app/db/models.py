@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import enum
 from datetime import datetime
+from decimal import Decimal
 from typing import Any
 
 from sqlalchemy import (
@@ -23,6 +24,7 @@ from sqlalchemy import (
     Index,
     Integer,
     MetaData,
+    Numeric,
     String,
     Text,
     UniqueConstraint,
@@ -121,6 +123,22 @@ class BillingPeriod(str, enum.Enum):
 # ─────────────────────────── Tables ─────────────────────────────────────────
 
 
+class Affiliate(Base):
+    __tablename__ = "affiliate"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    code: Mapped[str] = mapped_column(String(32), unique=True, nullable=False)
+    name: Mapped[str] = mapped_column(String(128), nullable=False)
+    email: Mapped[str | None] = mapped_column(String(255))
+    commission_pct: Mapped[Decimal] = mapped_column(Numeric(5, 2), nullable=False, default=Decimal("20.00"))
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    orders: Mapped[list["Order"]] = relationship(back_populates="affiliate")
+
+
 class User(Base):
     __tablename__ = "user"
 
@@ -194,6 +212,10 @@ class Order(Base):
     utm_sck: Mapped[str | None] = mapped_column(String(256))
     utm_src: Mapped[str | None] = mapped_column(String(256))
 
+    affiliate_id: Mapped[int | None] = mapped_column(ForeignKey(f"{SCHEMA}.affiliate.id"))
+    commission_paid_out: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    commission_paid_out_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False, index=True
     )
@@ -203,6 +225,7 @@ class Order(Base):
     error: Mapped[str | None] = mapped_column(Text)
 
     user: Mapped[User | None] = relationship(back_populates="orders")
+    affiliate: Mapped["Affiliate | None"] = relationship(back_populates="orders")
     plan: Mapped[Plan] = relationship()
     items: Mapped[list["OrderItem"]] = relationship(
         back_populates="order", cascade="all, delete-orphan", order_by="OrderItem.sequence"

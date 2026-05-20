@@ -16,6 +16,7 @@ from app.core.security import sign_guest_orders, sign_media_token, verify_guest_
 from app.core.settings import get_settings
 from app.services.meta_capi_client import report_initiate_checkout
 from app.db.models import (
+    Affiliate,
     Order,
     OrderItem,
     OrderStatus,
@@ -187,6 +188,20 @@ async def create_order(
     if plan is None or not plan.is_active:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="plan not found or inactive")
 
+    # Resolve affiliate code (silently ignore invalid/inactive codes)
+    affiliate_id: int | None = None
+    if payload.affiliate_code:
+        aff = (
+            await session.execute(
+                select(Affiliate).where(
+                    Affiliate.code == payload.affiliate_code,
+                    Affiliate.is_active.is_(True),
+                )
+            )
+        ).scalar_one_or_none()
+        if aff is not None:
+            affiliate_id = aff.id
+
     order = Order(
         user_id=user_id,
         plan_id=plan.id,
@@ -204,6 +219,7 @@ async def create_order(
         utm_term=payload.utm_term,
         utm_sck=payload.utm_sck,
         utm_src=payload.utm_src,
+        affiliate_id=affiliate_id,
     )
     session.add(order)
     await session.flush()

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from decimal import Decimal
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field
@@ -138,6 +139,7 @@ class OrderCreate(BaseModel):
     utm_term: str | None = Field(None, max_length=256)
     utm_sck: str | None = Field(None, max_length=256)
     utm_src: str | None = Field(None, max_length=256)
+    affiliate_code: str | None = Field(None, max_length=32)
 
 
 class OrderUpdate(BaseModel):
@@ -198,6 +200,52 @@ class CardCheckoutIn(BaseModel):
     payment_method_id: str           # "visa", "master", "elo", "debvisa", "debmaster", etc.
     installments: int = Field(default=1, ge=1, le=12)
     payer_doc_type: str | None = None  # "CPF"
+
+
+# ── Affiliate ──────────────────────────────────────────────────────────────
+
+
+class AffiliateCreate(BaseModel):
+    name: str = Field(..., max_length=128)
+    email: str | None = Field(None, max_length=255)
+    commission_pct: Decimal = Field(default=Decimal("20.00"), ge=0, le=100)
+
+
+class AffiliateUpdate(BaseModel):
+    name: str | None = Field(None, max_length=128)
+    email: str | None = Field(None, max_length=255)
+    commission_pct: Decimal | None = Field(None, ge=0, le=100)
+    is_active: bool | None = None
+
+
+class AffiliateOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    code: str
+    name: str
+    email: str | None
+    commission_pct: float
+    is_active: bool
+    created_at: datetime
+    total_orders: int = 0
+    total_earnings_cents: int = 0
+    unpaid_earnings_cents: int = 0
+
+
+class AffiliateOrderOut(BaseModel):
+    order_id: int
+    recipient_name: str | None
+    guest_phone: str | None
+    guest_email: str | None
+    plan_id: int
+    total_cents: int
+    commission_pct: float
+    commission_cents: int
+    commission_paid_out: bool
+    commission_paid_out_at: datetime | None
+    paid_at: datetime | None
+    created_at: datetime
     payer_doc_number: str | None = None
 
 
