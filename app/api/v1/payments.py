@@ -89,7 +89,7 @@ async def mercadopago_webhook(
             for item_id in item_ids:
                 await enqueue_process_item(item_id)
 
-            # Report Purchase to Meta via Stape CAPIG (server-side CAPI)
+            # Report Purchase to Meta via Facebook CAPI (server-side)
             asyncio.create_task(report_purchase(
                 order_id=order.id,
                 amount_cents=payment.amount_cents,

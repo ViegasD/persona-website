@@ -1,4 +1,4 @@
-"""Meta Conversions API client — sends server-side events via Stape CAPIG."""
+"""Meta Conversions API client — sends server-side events via Facebook CAPI."""
 
 from __future__ import annotations
 
@@ -13,6 +13,8 @@ from app.core.settings import get_settings
 
 logger = logging.getLogger(__name__)
 
+_CAPI_URL = "https://graph.facebook.com/v19.0/{pixel_id}/events"
+
 
 def _sha256(value: str) -> str:
     return hashlib.sha256(value.encode()).hexdigest()
@@ -25,13 +27,12 @@ def _hash_email(email: str | None) -> str | None:
 
 
 def _hash_phone(phone: str | None) -> str | None:
-    """Normalize to digits only then SHA-256."""
+    """Normalize to E.164 digits then SHA-256."""
     if not phone:
         return None
     digits = re.sub(r"\D", "", phone)
-    # Remove leading country code 55 if present and number is long enough
-    if digits.startswith("55") and len(digits) > 11:
-        digits = digits[2:]
+    if not digits.startswith("55"):
+        digits = "55" + digits
     return _sha256(digits)
 
 
@@ -43,7 +44,7 @@ async def report_purchase(
     phone: str | None,
     event_time: int | None = None,
 ) -> None:
-    """Send a Purchase event to Meta via Stape CAPIG (server-side CAPI)."""
+    """Send a Purchase event to Meta via Facebook CAPI."""
     await _send_event(
         event_name="Purchase",
         event_id=f"purchase_{order_id}",
@@ -65,7 +66,7 @@ async def report_initiate_checkout(
     email: str | None,
     phone: str | None,
 ) -> None:
-    """Send an InitiateCheckout event to Meta via Stape CAPIG."""
+    """Send an InitiateCheckout event to Meta via Facebook CAPI."""
     await _send_event(
         event_name="InitiateCheckout",
         event_id=f"initiate_checkout_{order_id}",
@@ -90,12 +91,11 @@ async def _send_event(
 ) -> None:
     settings = get_settings()
 
-    url = settings.stape_capig_url
-    identifier = settings.stape_capig_identifier
-    api_key = settings.stape_capig_api_key
+    pixel_id = settings.facebook_pixel_id
+    token = settings.facebook_capi_token
 
-    if not all([url, identifier, api_key]):
-        logger.debug("Stape CAPIG not configured — skipping %s", event_name)
+    if not pixel_id or not token:
+        logger.debug("Facebook CAPI not configured — skipping %s", event_name)
         return
 
     payload = {
@@ -115,17 +115,14 @@ async def _send_event(
         ]
     }
 
-    endpoint = f"{url.rstrip('/')}/{identifier}/events"
+    url = _CAPI_URL.format(pixel_id=pixel_id)
 
     try:
         async with httpx.AsyncClient(timeout=10) as client:
             resp = await client.post(
-                endpoint,
+                url,
+                params={"access_token": token},
                 json=payload,
-                headers={
-                    "Content-Type": "application/json",
-                    "Authorization": f"Bearer {api_key}",
-                },
             )
         if resp.status_code >= 400:
             logger.warning(

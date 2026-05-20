@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
@@ -180,6 +181,15 @@ async def approve_order(order_id: int, session: AsyncSession = Depends(get_sessi
         await session.commit()
         for item_id in item_ids:
             await enqueue_process_item(item_id)
+        # Report Purchase to Meta CAPI (fire-and-forget)
+        from app.services.meta_capi_client import report_purchase
+        asyncio.create_task(report_purchase(
+            order_id=order_id,
+            amount_cents=order.total_cents,
+            email=order.guest_email,
+            phone=order.guest_phone,
+            event_time=int(now.timestamp()),
+        ))
         return {"order_id": order_id, "status": order.status.value}
 
     await session.commit()
