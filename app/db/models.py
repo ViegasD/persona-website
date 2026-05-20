@@ -225,7 +225,7 @@ class Order(Base):
     error: Mapped[str | None] = mapped_column(Text)
 
     user: Mapped[User | None] = relationship(back_populates="orders")
-    affiliate: Mapped["Affiliate | None"] = relationship(back_populates="orders")
+    affiliate: Mapped[Affiliate | None] = relationship(back_populates="orders")
     plan: Mapped[Plan] = relationship()
     items: Mapped[list["OrderItem"]] = relationship(
         back_populates="order", cascade="all, delete-orphan", order_by="OrderItem.sequence"
