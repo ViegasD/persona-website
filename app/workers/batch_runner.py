@@ -22,7 +22,7 @@ import json
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import select, text
+from sqlalchemy import func, select, text
 from sqlalchemy.orm import selectinload
 
 from app.core.logging import configure_logging
@@ -342,19 +342,24 @@ async def run_batch(ctx: dict[str, Any], batch_id: int) -> None:  # noqa: ARG001
                 )
             ).scalars().all()
             for order_id in order_ids:
-                order = (
+                not_ready = (
                     await session.execute(
-                        select(Order)
-                        .where(Order.id == order_id)
-                        .options(selectinload(Order.items))
+                        select(func.count()).where(
+                            OrderItem.order_id == order_id,
+                            OrderItem.status != OrderItemStatus.READY,
+                        )
                     )
                 ).scalar_one()
-                if all(it.status == OrderItemStatus.READY for it in order.items):
-                    order.status = OrderStatus.READY
-                    order.generated_at = datetime.now(UTC)
-                    await session.commit()
-                    await delivery.deliver_order(session, order.id)
-                    await session.commit()
+                if not_ready == 0:
+                    order = (
+                        await session.execute(select(Order).where(Order.id == order_id))
+                    ).scalar_one()
+                    if order.status not in {OrderStatus.READY, OrderStatus.DELIVERED}:
+                        order.status = OrderStatus.READY
+                        order.generated_at = datetime.now(UTC)
+                        await session.commit()
+                        await delivery.deliver_order(session, order.id)
+                        await session.commit()
     except Exception as exc:  # noqa: BLE001
         async with session_scope() as session:
             batch = (
@@ -543,30 +548,35 @@ async def generate_video_for_approved_item(ctx: dict[str, Any], item_id: int) ->
                 quality=quality,
             )
 
+        # Mark this item READY in its own session, then check all-ready
+        # using a fresh session + scalar COUNT to avoid stale identity-map
+        # values from the initial selectinload earlier in this function.
         async with session_scope() as session:
             item = (
-                await session.execute(
-                    select(OrderItem)
-                    .where(OrderItem.id == item_id)
-                    .options(selectinload(OrderItem.order).selectinload(Order.items))
-                )
+                await session.execute(select(OrderItem).where(OrderItem.id == item_id))
             ).scalar_one()
+            order_id = item.order_id
             item.status = OrderItemStatus.READY
-            await session.commit()
 
-            order = (
+        # Fresh session: count items that are NOT yet READY.
+        async with session_scope() as session:
+            not_ready = (
                 await session.execute(
-                    select(Order)
-                    .where(Order.id == item.order_id)
-                    .options(selectinload(Order.items))
+                    select(func.count()).where(
+                        OrderItem.order_id == order_id,
+                        OrderItem.status != OrderItemStatus.READY,
+                    )
                 )
             ).scalar_one()
-            if all(it.status == OrderItemStatus.READY for it in order.items):
-                order.status = OrderStatus.READY
-                order.generated_at = datetime.now(UTC)
-                await session.commit()
-                await delivery.deliver_order(session, order.id)
-                await session.commit()
+            if not_ready == 0:
+                order = (
+                    await session.execute(select(Order).where(Order.id == order_id))
+                ).scalar_one()
+                if order.status not in {OrderStatus.READY, OrderStatus.DELIVERED}:
+                    order.status = OrderStatus.READY
+                    order.generated_at = datetime.now(UTC)
+                    await session.commit()
+                    await delivery.deliver_order(session, order_id)
 
     except Exception as exc:  # noqa: BLE001
         async with session_scope() as session:
