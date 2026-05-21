@@ -155,8 +155,16 @@ async def deliver_order_admin(order_id: int, session: AsyncSession = Depends(get
             status.HTTP_409_CONFLICT,
             detail="not all items are READY",
         )
+    # Advance order status to READY if it isn't already, so deliver_order
+    # doesn't bail on its status guard.
+    if order.status not in {OrderStatus.READY, OrderStatus.DELIVERED}:
+        order.status = OrderStatus.READY
+        order.generated_at = datetime.now(UTC)
+        await session.commit()
+
     from app.services.delivery import deliver_order
     deliveries = await deliver_order(session, order_id)
+    await session.commit()
     return {"order_id": order_id, "deliveries": len(deliveries)}
 
 
