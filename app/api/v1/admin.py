@@ -140,6 +140,26 @@ async def reprocess_order(order_id: int, session: AsyncSession = Depends(get_ses
     return {"order_id": order_id, "action": "requeued", "enqueued": enqueued, "errors": errors}
 
 
+@router.post("/orders/{order_id}/deliver", status_code=status.HTTP_200_OK)
+async def deliver_order_admin(order_id: int, session: AsyncSession = Depends(get_session)) -> dict:
+    """Manually trigger delivery for an order whose items are all READY."""
+    order = (
+        await session.execute(
+            select(Order).options(selectinload(Order.items)).where(Order.id == order_id)
+        )
+    ).scalar_one_or_none()
+    if order is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND)
+    if not order.items or not all(i.status == OrderItemStatus.READY for i in order.items):
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            detail="not all items are READY",
+        )
+    from app.services.delivery import deliver_order
+    deliveries = await deliver_order(session, order_id)
+    return {"order_id": order_id, "deliveries": len(deliveries)}
+
+
 @router.post("/orders/{order_id}/refund", status_code=status.HTTP_204_NO_CONTENT)
 async def refund_order(order_id: int, session: AsyncSession = Depends(get_session)) -> None:
     order = (await session.execute(select(Order).where(Order.id == order_id))).scalar_one_or_none()
