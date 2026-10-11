@@ -30,11 +30,18 @@ Both login methods share the same account and canonical welcome-credit claim.
 Customers can register or log in during checkout, select credits, see their
 balance, and sign out. The waiting page carries account authentication.
 `meus-videos.html` supports login, saved orders, current balance, and logout.
-`conta.html` supports confirmation, resend, password recovery/reset,
+The homepage links directly to login and standalone signup on `conta.html`;
+signed-in navigation links to the account and credits. Registration no longer
+requires creating an order. The account screen includes logout and supports
+confirmation, resend, password recovery/reset,
 balance/debt and credit history. Confirmation links expire in 24 hours;
 reset links in 30 minutes. Tokens are hashed and single-use. Browser
 fragments clear immediately; resets revoke existing sessions. Email
 requests have a 60-second per-account/purpose cooldown.
+`GET /api/v1/config` exposes only public keys and boolean email/processing
+availability flags, with no-store caching. Account and checkout screens explain
+unavailable signup/email delivery and paused generation without bypassing
+verification or changing balances. Google buttons remain commented out.
 Guest contact lookup requires a signed guest-order token or account access.
 Guest claiming requires login, matching email, and signed order ownership.
 
