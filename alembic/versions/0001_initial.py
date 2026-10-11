@@ -68,6 +68,8 @@ def upgrade() -> None:
         batch_trigger, payment_status, delivery_channel, delivery_status,
         subscription_status, billing_period,
     ):
+        # Types are explicitly created here; table DDL must not create them again.
+        e.create_type = False
         e.create(op.get_bind(), checkfirst=True)
 
     # ── user ──────────────────────────────────────────────────────────────

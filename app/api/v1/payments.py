@@ -4,17 +4,22 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime
+from decimal import Decimal
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.deps import get_current_user_id, get_guest_order_ids
+from app.api.v1.orders import _load_order
+from app.core.security import verify_guest_orders
 from app.core.settings import get_settings
 from app.db.models import Order, OrderItem, OrderStatus, Payment, PaymentStatus
 from app.db.session import get_session
 from app.services import mercadopago_client
+from app.services.credits import grant_paid_order_credit, reverse_order_credits
 from app.services.meta_capi_client import report_purchase
-from app.workers.queue import enqueue_process_item
+from app.services.outbox import record_video_jobs
 
 router = APIRouter(prefix="/payments", tags=["payments"])
 
@@ -47,37 +52,46 @@ async def mercadopago_webhook(
         # Not one of ours; ignore.
         return {"received": True}
 
+    # Use the same order-first lock order as checkout to avoid deadlocks.
+    order = (await session.execute(
+        select(Order).where(Order.id == order_id).with_for_update()
+    )).scalar_one_or_none()
+    if order is None:
+        return {"received": True}
+
     payment = (
         await session.execute(
             select(Payment).where(
-                Payment.provider == "mercadopago", Payment.provider_id == details["id"]
+                Payment.provider == "mercadopago", Payment.provider_id == str(details["id"]),
+                Payment.order_id == order_id,
             )
         )
     ).scalar_one_or_none()
     if payment is None:
-        # Could happen if the webhook arrives before our DB write commits;
-        # fall back to looking up by order id.
-        payment = (
-            await session.execute(
-                select(Payment).where(Payment.order_id == order_id).order_by(Payment.id.desc())
-            )
-        ).scalar_one_or_none()
-    if payment is None:
+        # Never apply a provider event to an unrelated payment attempt.
         return {"received": True}
 
     payment.raw_webhook = details
-    if details.get("status") == "approved" and payment.status != PaymentStatus.APPROVED:
+    if details.get("status") in {"refunded", "charged_back"}:
+        refunded = details.get("amount_refunded")
+        amount = details.get("amount")
+        full_refund = details.get("status") == "charged_back" or refunded is None or (amount is not None and Decimal(str(refunded)) >= Decimal(str(amount)))
+        if full_refund:
+            payment.status = PaymentStatus.REFUNDED
+        if full_refund and payment.funds_order and order.status != OrderStatus.REFUNDED:
+            order.status = OrderStatus.REFUNDED
+            await reverse_order_credits(session, order)
+        await session.commit()
+        return {"received": True}
+    if details.get("status") == "approved" and payment.status not in {PaymentStatus.APPROVED, PaymentStatus.REFUNDED}:
         payment.status = PaymentStatus.APPROVED
         payment.paid_at = datetime.now(UTC)
 
-        order = (
-            await session.execute(
-                select(Order).where(Order.id == order_id)
-            )
-        ).scalar_one_or_none()
         if order is not None and order.status in {OrderStatus.AWAITING_PAYMENT, OrderStatus.DRAFT}:
+            payment.funds_order = True
             order.status = OrderStatus.PAID
             order.paid_at = datetime.now(UTC)
+            await grant_paid_order_credit(session, order)
             await session.flush()
             # Enqueue per-item phase-1 processing immediately (no batch waiting).
             item_ids = (
@@ -85,9 +99,8 @@ async def mercadopago_webhook(
                     select(OrderItem.id).where(OrderItem.order_id == order.id)
                 )
             ).scalars().all()
+            await record_video_jobs(session, order, list(item_ids))
             await session.commit()
-            for item_id in item_ids:
-                await enqueue_process_item(item_id)
 
             # Report Purchase to Meta via Facebook CAPI (server-side)
             asyncio.create_task(report_purchase(
@@ -100,7 +113,7 @@ async def mercadopago_webhook(
 
             return {"received": True}
 
-    elif details.get("status") in {"rejected", "cancelled"}:
+    elif details.get("status") in {"rejected", "cancelled"} and payment.status == PaymentStatus.PENDING:
         payment.status = PaymentStatus.REJECTED
 
     await session.commit()
@@ -108,12 +121,22 @@ async def mercadopago_webhook(
 
 
 @router.get("/{payment_id}")
-async def get_payment(payment_id: int, session: AsyncSession = Depends(get_session)) -> dict:
+async def get_payment(
+    payment_id: int,
+    user_id: int | None = Depends(get_current_user_id),
+    guest_order_ids: list[int] = Depends(get_guest_order_ids),
+    x_guest_token: str | None = Header(default=None, alias="X-Guest-Token"),
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    if user_id is None and not guest_order_ids and not verify_guest_orders(x_guest_token or ""):
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="login or guest token required")
     payment = (
         await session.execute(select(Payment).where(Payment.id == payment_id))
     ).scalar_one_or_none()
     if payment is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="payment not found")
+    await _load_order(session, payment.order_id, user_id=user_id,
+                      guest_order_ids=guest_order_ids, guest_token=x_guest_token)
     return {
         "id": payment.id,
         "order_id": payment.order_id,

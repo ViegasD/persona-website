@@ -4,25 +4,26 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime
-from typing import cast
 
 from fastapi import APIRouter, Cookie, Depends, Header, HTTPException, Response, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.api.deps import GUEST_COOKIE_NAME, get_current_user_id, get_guest_order_ids
+from app.api.deps import GUEST_COOKIE_NAME, get_current_user_id, get_guest_order_ids, require_user
 from app.core.security import sign_guest_orders, sign_media_token, verify_guest_orders
 from app.core.settings import get_settings
-from app.services.meta_capi_client import report_initiate_checkout
 from app.db.models import (
     Affiliate,
+    CreditTransaction,
+    CreditTransactionType,
     Order,
     OrderItem,
     OrderStatus,
     Payment,
     PaymentStatus,
     Plan,
+    User,
 )
 from app.db.session import get_session
 from app.schemas.v1 import (
@@ -37,6 +38,9 @@ from app.schemas.v1 import (
     OrderUpdate,
 )
 from app.services import mercadopago_client, storage
+from app.services.credits import grant_paid_order_credit
+from app.services.meta_capi_client import report_initiate_checkout, report_purchase
+from app.services.outbox import record_video_jobs
 
 router = APIRouter(prefix="/orders", tags=["orders"])
 
@@ -51,12 +55,15 @@ async def _load_order(
     user_id: int | None,
     guest_order_ids: list[int],
     guest_token: str | None = None,
+    lock: bool = False,
 ) -> Order:
     stmt = (
         select(Order)
         .where(Order.id == order_id)
         .options(selectinload(Order.items), selectinload(Order.plan))
     )
+    if lock:
+        stmt = stmt.with_for_update().execution_options(populate_existing=True)
     order = (await session.execute(stmt)).scalar_one_or_none()
     if order is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="order not found")
@@ -128,6 +135,15 @@ def _ensure_draft(order: Order) -> None:
         raise HTTPException(status.HTTP_409_CONFLICT, detail="order no longer editable")
 
 
+async def _mark_order_paid_and_enqueue(session: AsyncSession, order: Order) -> None:
+    order.status = OrderStatus.PAID
+    order.paid_at = datetime.now(UTC)
+    await session.flush()
+    item_ids = [item.id for item in order.items]
+    await record_video_jobs(session, order, item_ids)
+    await session.commit()
+
+
 # ── Public lookup ──────────────────────────────────────────────────────────
 
 
@@ -135,17 +151,22 @@ def _ensure_draft(order: Order) -> None:
 async def lookup_orders_by_contact(
     phone: str | None = None,
     email: str | None = None,
+    user_id: int | None = Depends(get_current_user_id),
+    guest_order_ids: list[int] = Depends(get_guest_order_ids),
+    x_guest_token: str | None = Header(default=None, alias="X-Guest-Token"),
     session: AsyncSession = Depends(get_session),
 ) -> list[OrderOut]:
-    """Public endpoint: look up READY/DELIVERED orders by phone or email.
-
-    Returns orders that have at least one READY item so the user can watch
-    their videos. No auth required — contact info is the "password".
-    """
+    """Look up completed orders within the caller's account or signed guest orders."""
+    owned_ids = set(guest_order_ids)
+    if x_guest_token:
+        owned_ids.update(verify_guest_orders(x_guest_token))
+    if user_id is None and not owned_ids:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="login or guest token required")
     if not phone and not email:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="phone or email required")
 
-    from sqlalchemy import or_, func as safunc
+    from sqlalchemy import func as safunc
+    from sqlalchemy import or_
     conditions = []
     if phone:
         # Strip everything except digits for comparison (DB stores various formats)
@@ -163,6 +184,7 @@ async def lookup_orders_by_contact(
             select(Order)
             .options(selectinload(Order.items), selectinload(Order.plan))
             .where(
+                or_(Order.user_id == user_id if user_id is not None else False, Order.id.in_(owned_ids)),
                 Order.status.in_([OrderStatus.READY, OrderStatus.DELIVERED]),
                 or_(*conditions),
             )
@@ -172,6 +194,19 @@ async def lookup_orders_by_contact(
     ).scalars().all()
 
     return [_to_out(o) for o in orders]
+
+
+@router.get("/mine", response_model=list[OrderOut])
+async def my_orders(
+    user_id: int = Depends(require_user),
+    session: AsyncSession = Depends(get_session),
+) -> list[OrderOut]:
+    orders = (await session.execute(
+        select(Order).where(Order.user_id == user_id)
+        .options(selectinload(Order.items), selectinload(Order.plan))
+        .order_by(Order.created_at.desc()).limit(100)
+    )).scalars().all()
+    return [_to_out(order) for order in orders]
 
 
 # ── Endpoints ──────────────────────────────────────────────────────────────
@@ -454,7 +489,7 @@ async def checkout(
     session: AsyncSession = Depends(get_session),
 ) -> OrderCheckoutOut:
     settings = get_settings()
-    order = await _load_order(session, order_id, user_id=user_id, guest_order_ids=guest_order_ids, guest_token=x_guest_token)
+    order = await _load_order(session, order_id, user_id=user_id, guest_order_ids=guest_order_ids, guest_token=x_guest_token, lock=True)
 
     if order.status not in {OrderStatus.DRAFT, OrderStatus.AWAITING_PAYMENT}:
         raise HTTPException(status.HTTP_409_CONFLICT, detail=f"cannot checkout in status {order.status}")
@@ -464,16 +499,66 @@ async def checkout(
             detail=f"order needs exactly {order.plan.video_count} items (has {len(order.items)})",
         )
 
+    if card is not None and card.use_credits:
+        if user_id is None or order.user_id != user_id:
+            raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="login required to use credits")
+        user = (await session.execute(select(User).where(User.id == user_id).with_for_update()
+                                     .execution_options(populate_existing=True))).scalar_one_or_none()
+        if user is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, detail="user not found")
+        if user.email_verified_at is None:
+            raise HTTPException(status.HTTP_403_FORBIDDEN, detail="verify your email to use credits")
+        credits_needed = order.plan.video_count
+        if user.credit_balance < credits_needed:
+            raise HTTPException(
+                status.HTTP_402_PAYMENT_REQUIRED,
+                detail=f"not enough credits ({user.credit_balance}/{credits_needed})",
+            )
+        user.credit_balance -= credits_needed
+        order.total_cents = 0
+        session.add(
+            CreditTransaction(
+                user_id=user.id,
+                order_id=order.id,
+                kind=CreditTransactionType.REDEEM,
+                amount=-credits_needed,
+                balance_after=user.credit_balance,
+                note=f"Pedido #{order.id}",
+            )
+        )
+        payment = Payment(
+            order_id=order.id,
+            provider="credits",
+            provider_id=f"credits_{order.id}",
+            funds_order=True,
+            status=PaymentStatus.APPROVED,
+            amount_cents=0,
+            paid_at=datetime.now(UTC),
+        )
+        session.add(payment)
+        await _mark_order_paid_and_enqueue(session, order)
+        return OrderCheckoutOut(
+            order_id=order.id,
+            payment_id=payment.id,
+            payment_method="credits",
+            ticket_url=None,
+            expires_at=None,
+            amount_cents=0,
+            card_status="approved",
+        )
+
     # Reuse the most recent open Pix payment if present.
-    existing = (
+    existing = None if card is not None else (
         await session.execute(
             select(Payment)
             .where(Payment.order_id == order.id, Payment.status == PaymentStatus.PENDING)
             .order_by(Payment.id.desc())
+            .limit(1)
         )
     ).scalar_one_or_none()
     if existing is not None:
-        if existing.qr_code_payload:
+        if (existing.qr_code_payload and existing.amount_cents == order.total_cents
+                and (existing.expires_at is None or existing.expires_at > datetime.now(UTC))):
             # Valid prior attempt — return it directly.
             return OrderCheckoutOut(
                 order_id=order.id,
@@ -486,14 +571,16 @@ async def checkout(
                 amount_cents=existing.amount_cents,
             )
         else:
-            # Failed prior attempt (no QR code) — delete it so we can retry.
-            await session.delete(existing)
+            # Keep attempt history so a delayed provider notification still matches.
+            existing.status = PaymentStatus.EXPIRED
             await session.flush()
 
     notification_url = f"{settings.api_base_url.rstrip('/')}/api/v1/payments/mercadopago/webhook"
 
     # ── Card payment (credit or debit) ──────────────────────────────────────
     if card is not None:
+        if not card.card_token or not card.payment_method_id:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, detail="card data required")
         card_result = await mercadopago_client.create_card_payment(
             order_id=order.id,
             amount_cents=order.total_cents,
@@ -522,9 +609,20 @@ async def checkout(
         order.status = OrderStatus.AWAITING_PAYMENT
         # If immediately approved, mark paid
         if card_result["status"] == "approved":
-            order.status = OrderStatus.PAID
-            order.paid_at = datetime.now(UTC)
-        await session.commit()
+            payment.funds_order = True
+            payment.status = PaymentStatus.APPROVED
+            payment.paid_at = datetime.now(UTC)
+            await grant_paid_order_credit(session, order)
+            await _mark_order_paid_and_enqueue(session, order)
+            asyncio.create_task(report_purchase(
+                order_id=order.id, amount_cents=payment.amount_cents,
+                email=order.guest_email, phone=order.guest_phone,
+                event_time=int(order.paid_at.timestamp()),
+            ))
+        else:
+            if card_result["status"] in {"rejected", "cancelled"}:
+                payment.status = PaymentStatus.REJECTED
+            await session.commit()
         await session.refresh(payment)
         return OrderCheckoutOut(
             order_id=order.id,
@@ -584,6 +682,8 @@ async def download_item(
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, str]:
     order = await _load_order(session, order_id, user_id=user_id, guest_order_ids=guest_order_ids)
+    if order.status == OrderStatus.REFUNDED:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, detail="order refunded")
     item = next((i for i in order.items if i.id == item_id), None)
     if item is None or not item.video_s3_key:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="video not ready")

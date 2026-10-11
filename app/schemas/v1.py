@@ -10,6 +10,7 @@ from pydantic import BaseModel, ConfigDict, EmailStr, Field
 
 from app.db.models import (
     BillingPeriod,
+    CreditTransactionType,
     DeliveryChannel,
     DeliveryStatus,
     OrderItemStatus,
@@ -196,10 +197,12 @@ class OrderCheckoutOut(BaseModel):
 
 
 class CardCheckoutIn(BaseModel):
-    card_token: str
-    payment_method_id: str           # "visa", "master", "elo", "debvisa", "debmaster", etc.
+    use_credits: bool = False
+    card_token: str | None = None
+    payment_method_id: str | None = None  # "visa", "master", "elo", "debvisa", "debmaster", etc.
     installments: int = Field(default=1, ge=1, le=12)
     payer_doc_type: str | None = None  # "CPF"
+    payer_doc_number: str | None = None
 
 
 # ── Affiliate ──────────────────────────────────────────────────────────────
@@ -255,8 +258,8 @@ class AffiliateOrderOut(BaseModel):
 class RegisterIn(BaseModel):
     email: EmailStr
     password: str = Field(..., min_length=8, max_length=128)
-    name: str | None = None
-    phone: str | None = None
+    name: str | None = Field(None, max_length=255)
+    phone: str | None = Field(None, max_length=32)
 
 
 class LoginIn(BaseModel):
@@ -270,9 +273,57 @@ class TokenOut(BaseModel):
     user_id: int
 
 
+class UserOut(BaseModel):
+    google_linked: bool = False
+    id: int
+    email: str | None
+    name: str | None
+    phone: str | None
+    credit_balance: int
+    credit_debt: int = 0
+    email_verified: bool = False
+    created_at: datetime
+
+
 class GuestClaimIn(BaseModel):
     email: EmailStr
     code: str
+
+
+class CreditTransactionOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    order_id: int | None
+    kind: CreditTransactionType
+    amount: int
+    balance_after: int
+    debt_after: int = 0
+    note: str | None
+    created_at: datetime
+
+
+class CreditAccountOut(BaseModel):
+    balance: int
+    debt: int = 0
+    transactions: list[CreditTransactionOut]
+
+
+class AccountEmailIn(BaseModel):
+    email: EmailStr
+
+
+class AccountTokenIn(BaseModel):
+    token: str = Field(min_length=20, max_length=256)
+
+
+class GoogleCredentialIn(BaseModel):
+    credential: str = Field(min_length=20, max_length=10000)
+    nonce: str = Field(min_length=20, max_length=256)
+
+
+class PasswordResetIn(AccountTokenIn):
+    password: str = Field(min_length=8, max_length=128)
 
 
 # ── Payment ────────────────────────────────────────────────────────────────

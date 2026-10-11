@@ -14,7 +14,7 @@ from fastapi import APIRouter, HTTPException, Response, status
 from sqlalchemy import select
 
 from app.core.security import verify_media_token
-from app.db.models import OrderItem
+from app.db.models import Order, OrderItem, OrderStatus
 from app.db.session import session_scope
 from app.services import storage
 
@@ -30,7 +30,9 @@ async def proxy_media(token: str) -> Response:
 
     async with session_scope() as session:
         item = (
-            await session.execute(select(OrderItem).where(OrderItem.id == item_id))
+            await session.execute(select(OrderItem).join(Order).where(
+                OrderItem.id == item_id, Order.status != OrderStatus.REFUNDED,
+            ))
         ).scalar_one_or_none()
 
     if item is None:

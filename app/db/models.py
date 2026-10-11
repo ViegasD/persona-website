@@ -18,6 +18,7 @@ from sqlalchemy import (
     JSON,
     BigInteger,
     Boolean,
+    CheckConstraint,
     DateTime,
     Enum,
     ForeignKey,
@@ -120,6 +121,14 @@ class BillingPeriod(str, enum.Enum):
     MONTHLY = "monthly"
 
 
+class CreditTransactionType(str, enum.Enum):
+    SIGNUP_BONUS = "signup_bonus"
+    PURCHASE = "purchase"
+    REDEEM = "redeem"
+    ADJUSTMENT = "adjustment"
+    REFUND = "refund"
+
+
 # ─────────────────────────── Tables ─────────────────────────────────────────
 
 
@@ -141,18 +150,27 @@ class Affiliate(Base):
 
 class User(Base):
     __tablename__ = "user"
+    __table_args__ = (
+        CheckConstraint("credit_balance >= 0", name="ck_user_credit_balance"),
+        CheckConstraint("credit_debt >= 0", name="ck_user_credit_debt"),
+    )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     email: Mapped[str | None] = mapped_column(String(255), unique=True, index=True)
     phone: Mapped[str | None] = mapped_column(String(32), index=True)
     password_hash: Mapped[str | None] = mapped_column(String(255))
     name: Mapped[str | None] = mapped_column(String(255))
+    google_sub: Mapped[str | None] = mapped_column(String(255), unique=True)
+    credit_balance: Mapped[int] = mapped_column(Integer, default=0, nullable=False, server_default="0")
+    credit_debt: Mapped[int] = mapped_column(Integer, default=0, nullable=False, server_default="0")
+    token_version: Mapped[int] = mapped_column(Integer, default=0, nullable=False, server_default="0")
     email_verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
 
     orders: Mapped[list["Order"]] = relationship(back_populates="user")
+    credit_transactions: Mapped[list["CreditTransaction"]] = relationship(back_populates="user")
 
 
 class Plan(Base):
@@ -328,6 +346,8 @@ class BatchItem(Base):
 
 class Payment(Base):
     __tablename__ = "payment"
+
+    funds_order: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false", nullable=False)
     __table_args__ = (Index("ix_payment_provider_id", "provider", "provider_id", unique=True),)
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
@@ -354,6 +374,86 @@ class Payment(Base):
     )
 
     order: Mapped[Order] = relationship(back_populates="payments")
+
+
+class CreditTransaction(Base):
+    __tablename__ = "credit_transaction"
+    __table_args__ = (
+        UniqueConstraint("order_id", "kind", name="uq_credit_transaction_order_kind"),
+        CheckConstraint("balance_after >= 0", name="ck_credit_transaction_balance"),
+        Index("ix_credit_transaction_user_created", "user_id", "created_at"),
+        Index("ix_credit_transaction_order_id", "order_id"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey(f"{SCHEMA}.user.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    order_id: Mapped[int | None] = mapped_column(ForeignKey(f"{SCHEMA}.order.id", ondelete="SET NULL"))
+    kind: Mapped[CreditTransactionType] = mapped_column(
+        Enum(
+            CreditTransactionType,
+            name="credit_transaction_type",
+            schema=SCHEMA,
+            values_callable=lambda obj: [e.value for e in obj],
+        ),
+        nullable=False,
+    )
+    amount: Mapped[int] = mapped_column(Integer, nullable=False)
+    balance_after: Mapped[int] = mapped_column(Integer, nullable=False)
+    debt_after: Mapped[int] = mapped_column(Integer, default=0, nullable=False, server_default="0")
+    note: Mapped[str | None] = mapped_column(String(255))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    user: Mapped[User] = relationship(back_populates="credit_transactions")
+
+
+class AccountToken(Base):
+    __tablename__ = "account_token"
+    __table_args__ = (Index("ix_account_token_user_purpose", "user_id", "purpose", "created_at"),)
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey(f"{SCHEMA}.user.id", ondelete="CASCADE"), nullable=False)
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
+    purpose: Mapped[str] = mapped_column(String(16), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+
+class GoogleChallenge(Base):
+    __tablename__ = "google_challenge"
+
+    nonce_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class WelcomeCreditClaim(Base):
+    __tablename__ = "welcome_credit_claim"
+
+    identity_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey(f"{SCHEMA}.user.id", ondelete="CASCADE"), unique=True, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+
+class OutboxJob(Base):
+    __tablename__ = "outbox_job"
+    __table_args__ = (Index("ix_outbox_pending", "delivered_at", "available_at"),)
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    dedup_key: Mapped[str] = mapped_column(String(128), unique=True, nullable=False)
+    kind: Mapped[str] = mapped_column(String(32), nullable=False)
+    order_id: Mapped[int | None] = mapped_column(ForeignKey(f"{SCHEMA}.order.id", ondelete="CASCADE"))
+    user_id: Mapped[int | None] = mapped_column(ForeignKey(f"{SCHEMA}.user.id", ondelete="CASCADE"))
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    attempts: Mapped[int] = mapped_column(Integer, default=0, server_default="0", nullable=False)
+    available_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_error: Mapped[str | None] = mapped_column(String(255))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
 
 class Delivery(Base):
@@ -467,6 +567,7 @@ __all__ = [
     "Batch",
     "BatchItem",
     "Payment",
+    "CreditTransaction",
     "Delivery",
     "Subscription",
     "UpsellEvent",
@@ -482,6 +583,7 @@ __all__ = [
     "DeliveryStatus",
     "SubscriptionStatus",
     "BillingPeriod",
+    "CreditTransactionType",
 ]
 
 # Silence unused-import lint for JSON re-export (kept for downstream type hints)

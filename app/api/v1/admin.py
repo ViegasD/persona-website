@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime, timedelta
+from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from sqlalchemy import desc, func, select
@@ -27,7 +28,9 @@ from app.db.models import (
 )
 from app.db.session import get_session
 from app.schemas.v1 import OrderOut, PlanCreate, PlanOut, PlanUpdate
-from app.services import batch_collector, storage
+from app.services import batch_collector, mercadopago_client, storage
+from app.services.credits import reverse_order_credits
+from app.services.outbox import record_delivery_job, record_video_jobs
 
 router = APIRouter(prefix="/admin", tags=["admin"], dependencies=[Depends(require_admin_key)])
 
@@ -104,7 +107,8 @@ async def reprocess_order(order_id: int, session: AsyncSession = Depends(get_ses
     """Re-enqueue stuck items OR advance order status if all items are already READY."""
     order = (
         await session.execute(
-            select(Order).options(selectinload(Order.items)).where(Order.id == order_id)
+            select(Order).options(selectinload(Order.items)).where(Order.id == order_id).with_for_update()
+            .execution_options(populate_existing=True)
         )
     ).scalar_one_or_none()
     if order is None:
@@ -118,10 +122,9 @@ async def reprocess_order(order_id: int, session: AsyncSession = Depends(get_ses
     # If all items are already READY, the order just needs its status advanced.
     if order.items and all(i.status == OrderItemStatus.READY for i in order.items):
         order.status = OrderStatus.READY
+        await record_delivery_job(session, order)
         await session.commit()
         return {"order_id": order_id, "action": "marked_ready", "enqueued": [], "errors": []}
-
-    from app.workers.queue import enqueue_process_item
 
     enqueued = []
     errors = []
@@ -129,9 +132,10 @@ async def reprocess_order(order_id: int, session: AsyncSession = Depends(get_ses
         if item.status in {OrderItemStatus.PENDING, OrderItemStatus.FAILED}:
             item.status = OrderItemStatus.PENDING
             item.error = None
+            item.attempts = 0
             try:
                 await session.flush()
-                await enqueue_process_item(item.id)
+                await record_video_jobs(session, order, [item.id], generation=f"retry:{uuid4().hex}")
                 enqueued.append(item.id)
             except Exception as exc:
                 errors.append({"item_id": item.id, "error": str(exc)})
@@ -145,11 +149,13 @@ async def deliver_order_admin(order_id: int, session: AsyncSession = Depends(get
     """Manually trigger delivery for an order whose items are all READY."""
     order = (
         await session.execute(
-            select(Order).options(selectinload(Order.items)).where(Order.id == order_id)
+            select(Order).options(selectinload(Order.items)).where(Order.id == order_id).with_for_update()
         )
     ).scalar_one_or_none()
     if order is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND)
+    if order.status == OrderStatus.REFUNDED:
+        raise HTTPException(409, detail="refunded orders cannot be delivered")
     if not order.items or not all(i.status == OrderItemStatus.READY for i in order.items):
         raise HTTPException(
             status.HTTP_409_CONFLICT,
@@ -160,7 +166,6 @@ async def deliver_order_admin(order_id: int, session: AsyncSession = Depends(get
     if order.status not in {OrderStatus.READY, OrderStatus.DELIVERED}:
         order.status = OrderStatus.READY
         order.generated_at = datetime.now(UTC)
-        await session.commit()
 
     from app.services.delivery import deliver_order
     deliveries = await deliver_order(session, order_id)
@@ -170,10 +175,25 @@ async def deliver_order_admin(order_id: int, session: AsyncSession = Depends(get
 
 @router.post("/orders/{order_id}/refund", status_code=status.HTTP_204_NO_CONTENT)
 async def refund_order(order_id: int, session: AsyncSession = Depends(get_session)) -> None:
-    order = (await session.execute(select(Order).where(Order.id == order_id))).scalar_one_or_none()
+    order = (await session.execute(select(Order).where(Order.id == order_id).with_for_update())).scalar_one_or_none()
     if order is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND)
+    if order.status == OrderStatus.REFUNDED:
+        return
+    payments = (await session.execute(select(Payment).where(
+        Payment.order_id == order.id, Payment.status == PaymentStatus.APPROVED,
+    ))).scalars().all()
+    if not payments:
+        raise HTTPException(409, detail="order has no approved payment to refund")
+    for payment in payments:
+        if payment.provider == "mercadopago":
+            try:
+                await mercadopago_client.refund_payment(payment.provider_id)
+            except RuntimeError as exc:
+                raise HTTPException(502, detail="provider refund not confirmed; retry safely") from exc
+        payment.status = PaymentStatus.REFUNDED
     order.status = OrderStatus.REFUNDED
+    await reverse_order_credits(session, order)
     await session.commit()
 
 
@@ -182,11 +202,13 @@ async def approve_order(order_id: int, session: AsyncSession = Depends(get_sessi
     """Force-approve a payment for testing (bypasses MercadoPago)."""
     order = (
         await session.execute(
-            select(Order).options(selectinload(Order.items)).where(Order.id == order_id)
+            select(Order).options(selectinload(Order.items)).where(Order.id == order_id).with_for_update()
         )
     ).scalar_one_or_none()
     if order is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND)
+    if order.status == OrderStatus.REFUNDED:
+        raise HTTPException(409, detail="refunded orders cannot be approved")
 
     payment = (
         await session.execute(
@@ -200,15 +222,15 @@ async def approve_order(order_id: int, session: AsyncSession = Depends(get_sessi
         payment.paid_at = now
 
     if order.status not in {OrderStatus.PAID, OrderStatus.GENERATING, OrderStatus.READY, OrderStatus.DELIVERED}:
+        if payment is not None:
+            payment.funds_order = True
         order.status = OrderStatus.PAID
         order.paid_at = now
         await session.flush()
         # Enqueue per-item phase-1 processing immediately.
-        from app.workers.queue import enqueue_process_item
         item_ids = [it.id for it in order.items]
+        await record_video_jobs(session, order, item_ids)
         await session.commit()
-        for item_id in item_ids:
-            await enqueue_process_item(item_id)
         # Report Purchase to Meta CAPI (fire-and-forget)
         from app.services.meta_capi_client import report_purchase
         asyncio.create_task(report_purchase(
@@ -300,21 +322,15 @@ async def preview_item(
 @router.post("/items/{item_id}/approve", status_code=status.HTTP_200_OK)
 async def approve_item(item_id: int, session: AsyncSession = Depends(get_session)) -> dict:
     """Approve a pending item: triggers video generation (multi-char) or delivery (single-char)."""
-    item = (
-        await session.execute(select(OrderItem).where(OrderItem.id == item_id))
-    ).scalar_one_or_none()
-    if item is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND)
+    order, item = await _lock_active_item(session, item_id)
     if item.status != OrderItemStatus.AWAITING_APPROVAL:
         raise HTTPException(
             status.HTTP_409_CONFLICT,
             detail=f"item is {item.status.value}, expected AWAITING_APPROVAL",
         )
     item.status = OrderItemStatus.APPROVED
+    await record_video_jobs(session, order, [item_id], kind="generate_video", generation=f"approval:{item.attempts}")
     await session.commit()
-
-    from app.workers.queue import enqueue_generate_video
-    await enqueue_generate_video(item_id)
     return {"item_id": item_id, "status": item.status.value}
 
 
@@ -340,11 +356,7 @@ async def reject_item(item_id: int, session: AsyncSession = Depends(get_session)
 @router.post("/items/{item_id}/retry", status_code=status.HTTP_200_OK)
 async def retry_item(item_id: int, session: AsyncSession = Depends(get_session)) -> dict:
     """Re-enqueue a FAILED item for phase-1 processing."""
-    item = (
-        await session.execute(select(OrderItem).where(OrderItem.id == item_id))
-    ).scalar_one_or_none()
-    if item is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND)
+    order, item = await _lock_active_item(session, item_id)
     if item.status != OrderItemStatus.FAILED:
         raise HTTPException(
             status.HTTP_409_CONFLICT,
@@ -352,11 +364,23 @@ async def retry_item(item_id: int, session: AsyncSession = Depends(get_session))
         )
     item.status = OrderItemStatus.PENDING
     item.error = None
+    item.attempts = 0
+    await record_video_jobs(session, order, [item_id], generation=f"retry:{uuid4().hex}")
     await session.commit()
-
-    from app.workers.queue import enqueue_process_item
-    await enqueue_process_item(item_id)
     return {"item_id": item_id, "status": item.status.value}
+
+
+async def _lock_active_item(session: AsyncSession, item_id: int) -> tuple[Order, OrderItem]:
+    order_id = (await session.execute(select(OrderItem.order_id).where(OrderItem.id == item_id))).scalar_one_or_none()
+    if order_id is None:
+        raise HTTPException(404)
+    order = (await session.execute(select(Order).where(Order.id == order_id).with_for_update()
+                                   .execution_options(populate_existing=True))).scalar_one()
+    if order.status == OrderStatus.REFUNDED:
+        raise HTTPException(409, detail="refunded orders cannot be processed")
+    item = (await session.execute(select(OrderItem).where(OrderItem.id == item_id).with_for_update()
+                                  .execution_options(populate_existing=True))).scalar_one()
+    return order, item
 
 
 # ── Batches ────────────────────────────────────────────────────────────────

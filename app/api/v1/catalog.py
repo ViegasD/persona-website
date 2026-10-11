@@ -2,13 +2,20 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import Plan
 from app.db.session import get_session
-from app.schemas.v1 import CharacterOut, OccasionOut, PlanOut
+from app.schemas.v1 import CharacterOut as BaseCharacterOut
+from app.schemas.v1 import OccasionOut, PlanOut
+
+
+class CharacterOut(BaseCharacterOut):
+    # The shared character view exposes Node UUIDs; older catalogs used integers.
+    id: str | int
+
 
 router = APIRouter(prefix="/catalog", tags=["catalog"])
 
@@ -27,10 +34,8 @@ async def list_characters(
     offset: int = Query(0, ge=0),
     session: AsyncSession = Depends(get_session),
 ) -> list[CharacterOut]:
-    """Read characters from the read-only ``web.character_v`` view (which
-    proxies the Node backend's `Character` table). Returns an empty list
-    when the view doesn't exist (fresh dev databases)."""
-    where: list[str] = []
+    """Read active characters from the shared read-only character view."""
+    where: list[str] = ["is_active = true"]
     params: dict[str, object] = {"limit": limit, "offset": offset}
     if gender:
         where.append('lower("gender") = lower(:gender)')
@@ -41,8 +46,8 @@ async def list_characters(
     where_sql = ("WHERE " + " AND ".join(where)) if where else ""
     sql = text(
         f"""
-        SELECT id, name, slug, description, "thumbnailS3Key" AS thumbnail_key,
-               tags, gender, "ageRange" AS age_range
+        SELECT id, name, slug, description, thumbnail_s3_key AS thumbnail_key,
+               tags, gender, age_range
         FROM web.character_v
         {where_sql}
         ORDER BY id ASC
@@ -51,8 +56,8 @@ async def list_characters(
     )
     try:
         rows = (await session.execute(sql, params)).mappings().all()
-    except Exception:
-        return []
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail="Character catalog unavailable") from exc
 
     from app.services.storage import presigned_get_url
 
@@ -66,7 +71,7 @@ async def list_characters(
                 thumb_url = None
         out.append(
             CharacterOut(
-                id=r["id"],
+                id=r["id"] if isinstance(r["id"], int) else str(r["id"]),
                 name=r["name"],
                 slug=r.get("slug"),
                 description=r.get("description"),
@@ -83,9 +88,9 @@ async def list_characters(
 async def list_occasions(session: AsyncSession = Depends(get_session)) -> list[OccasionOut]:
     sql = text(
         """
-        SELECT slug, label, "promptHint" AS prompt_hint
+        SELECT slug, label, prompt_hint
         FROM web.occasion_v
-        WHERE COALESCE("isActive", true) = true
+        WHERE COALESCE(is_active, true) = true
         ORDER BY slug
         """
     )

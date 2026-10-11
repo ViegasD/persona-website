@@ -18,6 +18,7 @@ SCHEMA = "web"
 
 
 def upgrade() -> None:
+    op.execute(f'ALTER TABLE "{SCHEMA}".alembic_version ALTER COLUMN version_num TYPE VARCHAR(128)')
     # PostgreSQL requires ALTER TYPE … ADD VALUE outside a transaction block.
     op.execute("COMMIT")
     op.execute(

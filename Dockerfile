@@ -17,7 +17,8 @@ RUN pip install --upgrade pip && pip install .
 COPY app ./app
 COPY alembic ./alembic
 COPY alembic.ini ./
+COPY start.sh ./
 
 EXPOSE 8000
 
-CMD alembic upgrade head && arq app.workers.batch_runner.WorkerSettings & exec uvicorn app.main:app --host 0.0.0.0 --port 8000
+CMD ["sh", "/app/start.sh"]

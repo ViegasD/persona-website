@@ -14,6 +14,10 @@ import httpx
 
 from app.core.settings import get_settings
 
+_RETRY_STATUSES = {429, 500, 502, 503, 504}
+_MAX_RETRIES = 5
+_RETRY_BASE_DELAY = 5.0  # seconds; doubles each attempt
+
 
 class KieError(RuntimeError):
     pass
@@ -51,10 +55,24 @@ async def create_composite_task(
     if s.kie_callback_url:
         body["callBackUrl"] = s.kie_callback_url
 
-    async with httpx.AsyncClient(timeout=60) as client:
-        resp = await client.post(url, json=body, headers=_headers())
-        resp.raise_for_status()
-        data = resp.json()
+    last_exc: Exception | None = None
+    for attempt in range(_MAX_RETRIES):
+        async with httpx.AsyncClient(timeout=60) as client:
+            resp = await client.post(url, json=body, headers=_headers())
+        if resp.status_code not in _RETRY_STATUSES:
+            resp.raise_for_status()
+            break
+        from loguru import logger
+        delay = _RETRY_BASE_DELAY * (2 ** attempt)
+        logger.warning(
+            "kie createTask got {status}, retry {attempt}/{max} in {delay}s",
+            status=resp.status_code, attempt=attempt + 1, max=_MAX_RETRIES, delay=delay,
+        )
+        last_exc = KieError(f"kie createTask HTTP {resp.status_code}: {resp.text}")
+        await asyncio.sleep(delay)
+    else:
+        raise last_exc  # type: ignore[misc]
+    data = resp.json()
     if data.get("code") not in (200, 0):
         raise KieError(f"kie createTask failed: {data}")
     task_id = (data.get("data") or {}).get("taskId") or data.get("taskId")

@@ -21,18 +21,20 @@ import hashlib
 import json
 from datetime import UTC, datetime
 from typing import Any
+from uuid import uuid4
 
+from arq import cron
+from loguru import logger
 from sqlalchemy import func, select, text
 from sqlalchemy.orm import selectinload
 
 from app.core.logging import configure_logging
 from app.core.settings import get_settings
-from loguru import logger
 from app.db.models import (
+    ApiCostLog,
     Batch,
     BatchItem,
     BatchStatus,
-    ApiCostLog,
     CompositeFrameCache,
     Order,
     OrderItem,
@@ -41,13 +43,14 @@ from app.db.models import (
 )
 from app.db.session import session_scope
 from app.services import delivery, kie_client, script_writer, storage, xai_client
+from app.services.outbox import dispatch_outbox, record_delivery_job, record_video_jobs
 from app.services.prompt_builder import (
     CharacterLine,
     VideoPromptInputs,
     build_video_prompt,
 )
+from app.services.worker_recovery import recover_interrupted_jobs
 from app.workers.queue import redis_settings
-
 
 # ─────────────────────────── helpers ──────────────────────────────────────
 
@@ -408,16 +411,19 @@ async def process_item_phase1(ctx: dict[str, Any], item_id: int) -> None:  # noq
 
     In both cases the admin must approve before delivery happens.
     """
+    phase2_generation = "from:" + str(ctx.get("job_id") or uuid4().hex)
     try:
         async with session_scope() as session:
             item: OrderItem = (
                 await session.execute(
                     select(OrderItem)
-                    .where(OrderItem.id == item_id)
+                    .where(OrderItem.id == item_id).with_for_update()
                     .options(selectinload(OrderItem.order))
                 )
             ).scalar_one()
             order: Order = item.order
+            if order.status == OrderStatus.REFUNDED or item.status != OrderItemStatus.PENDING:
+                return
             item.attempts += 1
             item.status = OrderItemStatus.COMPOSITING
             await session.commit()
@@ -451,10 +457,8 @@ async def process_item_phase1(ctx: dict[str, Any], item_id: int) -> None:  # noq
                 if composite_key:
                     item.composite_image_s3_key = composite_key
                 item.status = OrderItemStatus.COMPOSITING
+                await record_video_jobs(session, order, [item_id], kind="generate_video", generation=phase2_generation)
                 await session.commit()
-            # Auto-approve: immediately enqueue phase 2 (video generation)
-            from app.workers.queue import enqueue_generate_video
-            await enqueue_generate_video(item_id)
         else:
             # ── Single-character: generate video directly ───────────────────
             input_image_url, _composite_key = await _resolve_composite_url(
@@ -471,10 +475,9 @@ async def process_item_phase1(ctx: dict[str, Any], item_id: int) -> None:  # noq
                 occasion_slug=occasion_slug,
                 custom_message=custom_message,
                 quality=quality,
+                queue_phase2=True,
+                phase2_generation=phase2_generation,
             )
-            # Auto-approve: immediately enqueue phase 2 (mark READY + deliver)
-            from app.workers.queue import enqueue_generate_video
-            await enqueue_generate_video(item_id)
 
     except Exception as exc:  # noqa: BLE001
         async with session_scope() as session:
@@ -502,11 +505,18 @@ async def generate_video_for_approved_item(ctx: dict[str, Any], item_id: int) ->
             item: OrderItem = (
                 await session.execute(
                     select(OrderItem)
-                    .where(OrderItem.id == item_id)
+                    .where(OrderItem.id == item_id).with_for_update()
                     .options(selectinload(OrderItem.order))
                 )
             ).scalar_one()
             order: Order = item.order
+            if order.status == OrderStatus.REFUNDED or item.status not in {
+                OrderItemStatus.COMPOSITING, OrderItemStatus.AWAITING_APPROVAL, OrderItemStatus.APPROVED,
+            }:
+                return
+            item.status = OrderItemStatus.RENDERING
+            item.attempts += 1
+            await session.commit()
             char_ids = list(item.character_ids)
             composite_key = item.composite_image_s3_key
             has_video = bool(item.video_s3_key)
@@ -570,13 +580,12 @@ async def generate_video_for_approved_item(ctx: dict[str, Any], item_id: int) ->
             ).scalar_one()
             if not_ready == 0:
                 order = (
-                    await session.execute(select(Order).where(Order.id == order_id))
+                    await session.execute(select(Order).where(Order.id == order_id).with_for_update())
                 ).scalar_one()
-                if order.status not in {OrderStatus.READY, OrderStatus.DELIVERED}:
+                if order.status not in {OrderStatus.READY, OrderStatus.DELIVERED, OrderStatus.REFUNDED}:
                     order.status = OrderStatus.READY
                     order.generated_at = datetime.now(UTC)
-                    await session.commit()
-                    await delivery.deliver_order(session, order_id)
+                    await record_delivery_job(session, order)
 
     except Exception as exc:  # noqa: BLE001
         async with session_scope() as session:
@@ -603,6 +612,8 @@ async def _generate_and_store_video(
     occasion_slug: str | None,
     custom_message: str | None,
     quality: str = "sd",
+    queue_phase2: bool = False,
+    phase2_generation: str = "",
 ) -> None:
     """Generate video via xAI Grok and store in S3, updating the OrderItem row."""
     settings = get_settings()
@@ -679,6 +690,9 @@ async def _generate_and_store_video(
         item.comfy_workflow_b_prompt_id = request_id  # repurposed: xAI request id
         item.resolved_script = prompt_text
         item.video_s3_key = video_key
+        if queue_phase2:
+            order = await session.get(Order, item.order_id)
+            await record_video_jobs(session, order, [item_id], kind="generate_video", generation=phase2_generation)
         await session.commit()
 
 
@@ -686,9 +700,10 @@ async def _generate_and_store_video(
 
 
 class WorkerSettings:
-    functions = [run_batch, collector_check, process_item_phase1, generate_video_for_approved_item]
+    functions = [run_batch, collector_check, process_item_phase1, generate_video_for_approved_item, dispatch_outbox, recover_interrupted_jobs]
     redis_settings = redis_settings()
-    cron_jobs: list = []
+    cron_jobs = [cron(dispatch_outbox, second={0, 10, 20, 30, 40, 50}, run_at_startup=True),
+                 cron(recover_interrupted_jobs, minute={0, 15, 30, 45}, run_at_startup=True)]
 
     @staticmethod
     async def on_startup(ctx: dict) -> None:  # noqa: ARG004

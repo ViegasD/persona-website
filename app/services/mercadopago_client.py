@@ -12,11 +12,19 @@ from typing import Any
 
 import mercadopago
 import qrcode
+from mercadopago.config import RequestOptions
 from qrcode.constants import ERROR_CORRECT_H
 
 from app.core.settings import get_settings
 
 EXTERNAL_REF_PREFIX = "web_"
+
+
+async def refund_payment(payment_id: str) -> None:
+    options = RequestOptions(custom_headers={"x-idempotency-key": f"persona-refund-{payment_id}"})
+    result = await asyncio.to_thread(_sdk().refund().create, payment_id, None, options)
+    if result.get("status") not in {200, 201}:
+        raise RuntimeError("payment provider did not confirm refund")
 
 _sdk_instance: mercadopago.SDK | None = None
 
@@ -133,12 +141,15 @@ async def get_payment_details(payment_id: str) -> dict[str, Any]:
 
     response = await asyncio.to_thread(_get)
     payment = response.get("response", {})
+    if response.get("status") != 200 or str(payment.get("id")) != str(payment_id):
+        raise RuntimeError("payment provider lookup failed")
     return {
         "id": str(payment.get("id")),
         "status": payment.get("status"),
         "external_reference": payment.get("external_reference"),
         "payment_method": payment.get("payment_method_id"),
         "amount": payment.get("transaction_amount"),
+        "amount_refunded": payment.get("transaction_amount_refunded"),
         "paid_at": payment.get("date_approved"),
     }
 

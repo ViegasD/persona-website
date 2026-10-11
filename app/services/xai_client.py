@@ -16,6 +16,10 @@ from loguru import logger
 
 from app.core.settings import get_settings
 
+_RETRY_STATUSES = {429, 500, 502, 503, 504}
+_MAX_RETRIES = 5
+_RETRY_BASE_DELAY = 5.0  # seconds; doubles each attempt
+
 
 class XaiError(RuntimeError):
     pass
@@ -59,11 +63,24 @@ async def start_image_to_video(
         img_prefix=(image_url[:80] + "…") if len(image_url) > 80 else image_url,
     )
     logger.debug("xAI prompt text:\n{p}", p=prompt)
-    async with httpx.AsyncClient(timeout=60) as client:
-        resp = await client.post(url, json=body, headers=_headers())
-        if resp.status_code >= 400:
-            raise XaiError(f"xAI start failed {resp.status_code}: {resp.text}")
-        data = resp.json()
+    last_exc: Exception | None = None
+    for attempt in range(_MAX_RETRIES):
+        async with httpx.AsyncClient(timeout=60) as client:
+            resp = await client.post(url, json=body, headers=_headers())
+        if resp.status_code not in _RETRY_STATUSES:
+            if resp.status_code >= 400:
+                raise XaiError(f"xAI start failed {resp.status_code}: {resp.text}")
+            break
+        delay = _RETRY_BASE_DELAY * (2 ** attempt)
+        logger.warning(
+            "xAI start_image_to_video got {status}, retry {attempt}/{max} in {delay}s",
+            status=resp.status_code, attempt=attempt + 1, max=_MAX_RETRIES, delay=delay,
+        )
+        last_exc = XaiError(f"xAI start failed {resp.status_code}: {resp.text}")
+        await asyncio.sleep(delay)
+    else:
+        raise last_exc  # type: ignore[misc]
+    data = resp.json()
     rid = data.get("request_id")
     if not rid:
         raise XaiError(f"xAI start returned no request_id: {data}")

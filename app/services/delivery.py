@@ -28,7 +28,8 @@ async def deliver_order(session: AsyncSession, order_id: int) -> list[Delivery]:
       regenerated on demand from the download endpoint anyway).
     - If a phone is on file, fires a WhatsApp send via Evolution API.
     """
-    order = (await session.execute(select(Order).where(Order.id == order_id))).scalar_one()
+    order = (await session.execute(select(Order).where(Order.id == order_id).with_for_update()
+                                   .execution_options(populate_existing=True))).scalar_one()
     if order.status not in {OrderStatus.READY, OrderStatus.DELIVERED}:
         return []
 

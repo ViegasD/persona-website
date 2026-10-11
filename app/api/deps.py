@@ -3,20 +3,31 @@
 from __future__ import annotations
 
 from fastapi import Cookie, Depends, Header, HTTPException, status
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.security import decode_user_token, verify_guest_orders
+from app.core.security import decode_user_claims, verify_guest_orders
 from app.core.settings import get_settings
+from app.db.models import User
+from app.db.session import get_session
 
 GUEST_COOKIE_NAME = "persona_guest_order"
 
 
-def get_current_user_id(
+async def get_current_user_id(
     authorization: str | None = Header(default=None, alias="Authorization"),
+    session: AsyncSession = Depends(get_session),
 ) -> int | None:
     if not authorization or not authorization.lower().startswith("bearer "):
         return None
     token = authorization.split(" ", 1)[1].strip()
-    return decode_user_token(token)
+    claims = decode_user_claims(token)
+    if claims is None:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="invalid session")
+    user = (await session.execute(select(User.id, User.token_version).where(User.id == claims[0]))).one_or_none()
+    if user is None or user.token_version != claims[1]:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="session expired")
+    return user.id
 
 
 def get_guest_order_ids(

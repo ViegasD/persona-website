@@ -25,24 +25,30 @@ def verify_password(plain: str, hashed: str) -> bool:
         return False
 
 
-def create_user_token(user_id: int) -> str:
+def create_user_token(user_id: int, token_version: int = 0) -> str:
     settings = get_settings()
     payload = {
         "sub": str(user_id),
         "iat": datetime.now(UTC),
         "exp": datetime.now(UTC) + timedelta(hours=settings.jwt_expiry_hours),
         "kind": "user",
+        "ver": token_version,
     }
     return jwt.encode(payload, settings.jwt_secret, algorithm="HS256")
 
 
 def decode_user_token(token: str) -> int | None:
+    claims = decode_user_claims(token)
+    return claims[0] if claims else None
+
+
+def decode_user_claims(token: str) -> tuple[int, int] | None:
     settings = get_settings()
     try:
         payload = jwt.decode(token, settings.jwt_secret, algorithms=["HS256"])
         if payload.get("kind") != "user":
             return None
-        return int(payload["sub"])
+        return int(payload["sub"]), int(payload.get("ver", 0))
     except (jwt.PyJWTError, ValueError, KeyError):
         return None
 

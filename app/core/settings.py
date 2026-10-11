@@ -70,10 +70,19 @@ class Settings(BaseSettings):
     batch_concurrency: int = Field(4, alias="BATCH_CONCURRENCY")
 
     # --- Auth ---
+    google_client_id: str | None = Field(None, alias="STOREFRONT_GOOGLE_CLIENT_ID")
     jwt_secret: str = Field(..., alias="JWT_SECRET")
     jwt_expiry_hours: int = Field(24 * 30, alias="STOREFRONT_JWT_EXPIRY_HOURS")
     guest_cookie_secret: str = Field(..., alias="STOREFRONT_GUEST_COOKIE_SECRET")
     admin_api_key: str = Field(..., alias="STOREFRONT_ADMIN_API_KEY")
+    account_page_url: str = Field("http://localhost:3000/conta.html", alias="STOREFRONT_ACCOUNT_PAGE_URL")
+    smtp_host: str | None = Field(None, alias="STOREFRONT_SMTP_HOST")
+    smtp_port: int = Field(587, alias="STOREFRONT_SMTP_PORT")
+    smtp_user: str | None = Field(None, alias="STOREFRONT_SMTP_USER")
+    smtp_password: str | None = Field(None, alias="STOREFRONT_SMTP_PASSWORD")
+    smtp_from: str | None = Field(None, alias="STOREFRONT_SMTP_FROM")
+    smtp_starttls: bool = Field(True, alias="STOREFRONT_SMTP_STARTTLS")
+    smtp_ssl: bool = Field(False, alias="STOREFRONT_SMTP_SSL")
 
     # --- WhatsApp delivery via Evolution API ---
     evolution_api_url: str | None = Field(None, alias="EVOLUTION_API_URL")
