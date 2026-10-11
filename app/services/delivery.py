@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 import httpx
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from app.core.settings import get_settings
 from app.db.models import (
@@ -18,48 +19,61 @@ from app.db.models import (
     OrderItemStatus,
     OrderStatus,
 )
+from app.services.processing_policy import processing_allowed, processing_enabled
 from app.services.storage import presigned_get_url
 
 
 async def deliver_order(session: AsyncSession, order_id: int) -> list[Delivery]:
     """Idempotently produce the deliveries for a READY/DELIVERED order.
 
-    - Always records an ``account`` delivery with signed URLs (they are
-      regenerated on demand from the download endpoint anyway).
-    - If a phone is on file, fires a WhatsApp send via Evolution API.
+    - Complete orders get one website delivery; links are generated on demand.
+    - WhatsApp is an optional, explicitly enabled secondary channel.
     """
-    order = (await session.execute(select(Order).where(Order.id == order_id).with_for_update()
+    if not processing_enabled():
+        return []
+    order = (await session.execute(select(Order).options(selectinload(Order.plan)).where(Order.id == order_id).with_for_update()
                                    .execution_options(populate_existing=True))).scalar_one()
-    if order.status not in {OrderStatus.READY, OrderStatus.DELIVERED}:
+    if not processing_allowed(order) or order.status not in {OrderStatus.READY, OrderStatus.DELIVERED}:
         return []
 
     items = (
         await session.execute(
             select(OrderItem).where(
-                OrderItem.order_id == order.id, OrderItem.status == OrderItemStatus.READY
+                OrderItem.order_id == order.id
             )
         )
     ).scalars().all()
 
-    deliveries: list[Delivery] = []
+    if (order.plan.video_count <= 0 or len(items) != order.plan.video_count
+            or any(item.status != OrderItemStatus.READY or not item.video_s3_key for item in items)):
+        return []
+    existing = (await session.execute(select(Delivery).where(Delivery.order_id == order.id))).scalars().all()
+    deliveries: list[Delivery] = list(existing)
 
     # Account channel — always.
-    account = Delivery(
-        order_id=order.id,
-        channel=DeliveryChannel.ACCOUNT,
-        status=DeliveryStatus.SUCCEEDED,
-        target=order.guest_email,
-        attempted_at=datetime.now(UTC),
-        succeeded_at=datetime.now(UTC),
-        payload={"video_count": len(items)},
-    )
-    session.add(account)
-    deliveries.append(account)
+    account = next((d for d in existing if d.channel == DeliveryChannel.ACCOUNT
+                    and d.status == DeliveryStatus.SUCCEEDED), None)
+    if account is None:
+        account = Delivery(
+            order_id=order.id,
+            channel=DeliveryChannel.ACCOUNT,
+            status=DeliveryStatus.SUCCEEDED,
+            target=order.guest_email,
+            attempted_at=datetime.now(UTC),
+            succeeded_at=datetime.now(UTC),
+            payload={"video_count": len(items)},
+        )
+        session.add(account)
+        deliveries.append(account)
 
     # WhatsApp channel.
     phone = order.guest_phone
     settings = get_settings()
-    if phone and settings.evolution_api_url and settings.evolution_api_key:
+    order.status = OrderStatus.DELIVERED
+    order.delivered_at = order.delivered_at or datetime.now(UTC)
+    if (settings.whatsapp_delivery_enabled and phone and settings.evolution_api_url
+            and settings.evolution_api_key and settings.evolution_instance_name
+            and not any(d.channel == DeliveryChannel.WHATSAPP for d in existing)):
         wa = Delivery(
             order_id=order.id,
             channel=DeliveryChannel.WHATSAPP,
@@ -68,18 +82,18 @@ async def deliver_order(session: AsyncSession, order_id: int) -> list[Delivery]:
             attempted_at=datetime.now(UTC),
         )
         session.add(wa)
+        # Persist an at-most-once notification claim before the external send.
+        # A crash leaves PENDING for operator review, never an automatic resend.
+        await session.commit()
         try:
             await _send_whatsapp_videos(phone, items)
             wa.status = DeliveryStatus.SUCCEEDED
             wa.succeeded_at = datetime.now(UTC)
         except Exception as exc:  # noqa: BLE001 - we want any failure recorded
             wa.status = DeliveryStatus.FAILED
-            wa.error = str(exc)[:500]
+            wa.error = type(exc).__name__
         deliveries.append(wa)
 
-    if any(d.status == DeliveryStatus.SUCCEEDED for d in deliveries):
-        order.status = OrderStatus.DELIVERED
-        order.delivered_at = datetime.now(UTC)
     return deliveries
 
 

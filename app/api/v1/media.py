@@ -13,8 +13,8 @@ from __future__ import annotations
 from fastapi import APIRouter, HTTPException, Response, status
 from sqlalchemy import select
 
-from app.core.security import verify_media_token
-from app.db.models import Order, OrderItem, OrderStatus
+from app.core.security import verify_media_preview_token, verify_media_token
+from app.db.models import Order, OrderItem, OrderItemStatus, OrderStatus
 from app.db.session import session_scope
 from app.services import storage
 
@@ -25,14 +25,22 @@ router = APIRouter(prefix="/media", tags=["media"])
 async def proxy_media(token: str) -> Response:
     """Stream an order item's video (or composite image) from S3."""
     item_id = verify_media_token(token)
+    preview = False
+    if item_id is None:
+        item_id = verify_media_preview_token(token)
+        preview = item_id is not None
     if item_id is None:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="invalid or expired token")
 
     async with session_scope() as session:
+        stmt = select(OrderItem).join(Order).where(
+            OrderItem.id == item_id, Order.status != OrderStatus.REFUNDED,
+        )
+        if not preview:
+            stmt = stmt.where(Order.status.in_([OrderStatus.READY, OrderStatus.DELIVERED]),
+                              OrderItem.status == OrderItemStatus.READY)
         item = (
-            await session.execute(select(OrderItem).join(Order).where(
-                OrderItem.id == item_id, Order.status != OrderStatus.REFUNDED,
-            ))
+            await session.execute(stmt)
         ).scalar_one_or_none()
 
     if item is None:

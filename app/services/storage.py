@@ -9,7 +9,6 @@ from botocore.client import Config
 
 from app.core.settings import get_settings
 
-
 _settings = get_settings()
 
 
@@ -62,12 +61,14 @@ def get_image_as_data_url(key: str) -> str:
     """
     import base64
     import io
-    import mimetypes
+
+    from PIL import Image
 
     data = download_bytes(key)
-    mime = mimetypes.guess_type(key)[0] or "image/jpeg"
+    with Image.open(io.BytesIO(data)) as image:
+        image.load()
+        mime = {"JPEG": "image/jpeg", "PNG": "image/png"}.get(image.format)
     if mime not in ("image/jpeg", "image/png"):
-        from PIL import Image
         img = Image.open(io.BytesIO(data)).convert("RGB")
         buf = io.BytesIO()
         img.save(buf, format="JPEG", quality=90)

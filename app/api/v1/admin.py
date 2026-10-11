@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.api.deps import require_admin_key
-from app.core.security import sign_media_token
+from app.core.security import sign_media_preview_token
 from app.db.models import (
     ApiCostLog,
     Batch,
@@ -31,8 +31,14 @@ from app.schemas.v1 import OrderOut, PlanCreate, PlanOut, PlanUpdate
 from app.services import batch_collector, mercadopago_client, storage
 from app.services.credits import reverse_order_credits
 from app.services.outbox import record_delivery_job, record_video_jobs
+from app.services.processing_policy import processing_allowed
 
 router = APIRouter(prefix="/admin", tags=["admin"], dependencies=[Depends(require_admin_key)])
+
+
+def _require_processing(order: Order) -> None:
+    if not processing_allowed(order):
+        raise HTTPException(503, detail="processing paused or order outside processing window")
 
 
 # ── Plans CRUD ─────────────────────────────────────────────────────────────
@@ -107,7 +113,7 @@ async def reprocess_order(order_id: int, session: AsyncSession = Depends(get_ses
     """Re-enqueue stuck items OR advance order status if all items are already READY."""
     order = (
         await session.execute(
-            select(Order).options(selectinload(Order.items)).where(Order.id == order_id).with_for_update()
+            select(Order).options(selectinload(Order.items), selectinload(Order.plan)).where(Order.id == order_id).with_for_update()
             .execution_options(populate_existing=True)
         )
     ).scalar_one_or_none()
@@ -118,9 +124,11 @@ async def reprocess_order(order_id: int, session: AsyncSession = Depends(get_ses
             status.HTTP_409_CONFLICT,
             detail=f"order is {order.status.value}, expected PAID or QUEUED",
         )
+    _require_processing(order)
 
     # If all items are already READY, the order just needs its status advanced.
-    if order.items and all(i.status == OrderItemStatus.READY for i in order.items):
+    if (order.plan.video_count > 0 and len(order.items) == order.plan.video_count
+            and all(i.status == OrderItemStatus.READY and i.video_s3_key for i in order.items)):
         order.status = OrderStatus.READY
         await record_delivery_job(session, order)
         await session.commit()
@@ -149,14 +157,16 @@ async def deliver_order_admin(order_id: int, session: AsyncSession = Depends(get
     """Manually trigger delivery for an order whose items are all READY."""
     order = (
         await session.execute(
-            select(Order).options(selectinload(Order.items)).where(Order.id == order_id).with_for_update()
+            select(Order).options(selectinload(Order.items), selectinload(Order.plan)).where(Order.id == order_id).with_for_update()
         )
     ).scalar_one_or_none()
     if order is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND)
     if order.status == OrderStatus.REFUNDED:
         raise HTTPException(409, detail="refunded orders cannot be delivered")
-    if not order.items or not all(i.status == OrderItemStatus.READY for i in order.items):
+    _require_processing(order)
+    if (order.plan.video_count <= 0 or len(order.items) != order.plan.video_count
+            or not all(i.status == OrderItemStatus.READY and i.video_s3_key for i in order.items)):
         raise HTTPException(
             status.HTTP_409_CONFLICT,
             detail="not all items are READY",
@@ -209,6 +219,7 @@ async def approve_order(order_id: int, session: AsyncSession = Depends(get_sessi
         raise HTTPException(status.HTTP_404_NOT_FOUND)
     if order.status == OrderStatus.REFUNDED:
         raise HTTPException(409, detail="refunded orders cannot be approved")
+    _require_processing(order)
 
     payment = (
         await session.execute(
@@ -276,7 +287,7 @@ async def list_pending_approval(
         is_multi = len(item.character_ids) > 1
         has_preview = bool(item.video_s3_key or item.composite_image_s3_key)
         if has_preview:
-            token = sign_media_token(item.id)
+            token = sign_media_preview_token(item.id)
             preview_url = f"{api_base}/api/v1/media/{token}"
         else:
             preview_url = None
@@ -378,6 +389,7 @@ async def _lock_active_item(session: AsyncSession, item_id: int) -> tuple[Order,
                                    .execution_options(populate_existing=True))).scalar_one()
     if order.status == OrderStatus.REFUNDED:
         raise HTTPException(409, detail="refunded orders cannot be processed")
+    _require_processing(order)
     item = (await session.execute(select(OrderItem).where(OrderItem.id == item_id).with_for_update()
                                   .execution_options(populate_existing=True))).scalar_one()
     return order, item

@@ -44,6 +44,7 @@ from app.db.models import (
 from app.db.session import session_scope
 from app.services import delivery, kie_client, script_writer, storage, xai_client
 from app.services.outbox import dispatch_outbox, record_delivery_job, record_video_jobs
+from app.services.processing_policy import processing_allowed, processing_enabled
 from app.services.prompt_builder import (
     CharacterLine,
     VideoPromptInputs,
@@ -207,7 +208,7 @@ async def _resolve_composite_url(
     composite_url = kie_client.extract_first_image_url(payload)
 
     # Persist a copy in our S3 so we don't depend on kie's CDN expiry.
-    raw = await xai_client.download_video(composite_url)  # generic GET wrapper
+    raw = await xai_client.download_image(composite_url)
     s3_key = storage.storefront_key("composites", f"{sha}.png")
     storage.upload_bytes(s3_key, raw, content_type="image/png")
     async with session_scope() as session:
@@ -223,6 +224,8 @@ async def _resolve_composite_url(
 
 async def _generate_video_for_item(item_id: int) -> None:
     """Used by the legacy run_batch path. Generates composite + video end-to-end → READY."""
+    if not processing_enabled():
+        return
     async with session_scope() as session:
         item: OrderItem = (
             await session.execute(
@@ -232,6 +235,8 @@ async def _generate_video_for_item(item_id: int) -> None:
             )
         ).scalar_one()
         order: Order = item.order
+        if not processing_allowed(order) or order.status not in {OrderStatus.PAID, OrderStatus.QUEUED, OrderStatus.GENERATING}:
+            return
         item.attempts += 1
         item.status = OrderItemStatus.COMPOSITING
         await session.commit()
@@ -288,6 +293,8 @@ async def _generate_video_for_item(item_id: int) -> None:
 
 
 async def run_batch(ctx: dict[str, Any], batch_id: int) -> None:  # noqa: ARG001
+    if not processing_enabled():
+        return
     settings = get_settings()
     try:
         async with session_scope() as session:
@@ -295,6 +302,11 @@ async def run_batch(ctx: dict[str, Any], batch_id: int) -> None:  # noqa: ARG001
                 await session.execute(select(Batch).where(Batch.id == batch_id))
             ).scalar_one()
             if batch.status not in {BatchStatus.STARTING_POD, BatchStatus.COLLECTING}:
+                return
+            orders = (await session.execute(select(Order).join(OrderItem).join(
+                BatchItem, BatchItem.order_item_id == OrderItem.id
+            ).where(BatchItem.batch_id == batch_id))).scalars().all()
+            if not orders or any(not processing_allowed(order) for order in orders):
                 return
             batch.status = BatchStatus.RUNNING
             batch.started_at = batch.started_at or datetime.now(UTC)
@@ -378,6 +390,8 @@ async def run_batch(ctx: dict[str, Any], batch_id: int) -> None:  # noqa: ARG001
 
 async def collector_check(ctx: dict[str, Any]) -> None:  # noqa: ARG001
     """Periodic: trigger the open batch when its age exceeds the policy."""
+    if not processing_enabled():
+        return
     from app.services import batch_collector
     from app.workers.queue import enqueue_run_batch
 
@@ -390,6 +404,11 @@ async def collector_check(ctx: dict[str, Any]) -> None:  # noqa: ARG001
             )
         ).scalar_one_or_none()
         if batch is None or batch.order_count == 0:
+            return
+        orders = (await session.execute(select(Order).join(OrderItem).join(
+            BatchItem, BatchItem.order_item_id == OrderItem.id
+        ).where(BatchItem.batch_id == batch.id))).scalars().all()
+        if not orders or any(not processing_allowed(order) for order in orders):
             return
         trigger = await batch_collector.should_trigger(session, batch)
         if trigger is None:
@@ -411,6 +430,8 @@ async def process_item_phase1(ctx: dict[str, Any], item_id: int) -> None:  # noq
 
     In both cases the admin must approve before delivery happens.
     """
+    if not processing_enabled():
+        return
     phase2_generation = "from:" + str(ctx.get("job_id") or uuid4().hex)
     try:
         async with session_scope() as session:
@@ -422,7 +443,8 @@ async def process_item_phase1(ctx: dict[str, Any], item_id: int) -> None:  # noq
                 )
             ).scalar_one()
             order: Order = item.order
-            if order.status == OrderStatus.REFUNDED or item.status != OrderItemStatus.PENDING:
+            if (not processing_allowed(order) or order.status not in {OrderStatus.PAID, OrderStatus.QUEUED, OrderStatus.GENERATING}
+                    or item.status != OrderItemStatus.PENDING):
                 return
             item.attempts += 1
             item.status = OrderItemStatus.COMPOSITING
@@ -500,6 +522,8 @@ async def generate_video_for_approved_item(ctx: dict[str, Any], item_id: int) ->
     • Multi-char (has composite, no video): generate video → READY → deliver if order complete
     • Single-char (already has video from phase 1): just mark READY → deliver if order complete
     """
+    if not processing_enabled():
+        return
     try:
         async with session_scope() as session:
             item: OrderItem = (
@@ -510,7 +534,7 @@ async def generate_video_for_approved_item(ctx: dict[str, Any], item_id: int) ->
                 )
             ).scalar_one()
             order: Order = item.order
-            if order.status == OrderStatus.REFUNDED or item.status not in {
+            if not processing_allowed(order) or order.status not in {OrderStatus.PAID, OrderStatus.QUEUED, OrderStatus.GENERATING} or item.status not in {
                 OrderItemStatus.COMPOSITING, OrderItemStatus.AWAITING_APPROVAL, OrderItemStatus.APPROVED,
             }:
                 return
@@ -670,7 +694,7 @@ async def _generate_and_store_video(
     video_info = result.get("video") or {}
     video_url = video_info.get("url")
     if not video_url:
-        raise RuntimeError(f"xAI returned no video url: {result}")
+        raise xai_client.XaiError("xAI returned no video URL")
 
     async with session_scope() as session:
         item = (
@@ -707,7 +731,21 @@ class WorkerSettings:
 
     @staticmethod
     async def on_startup(ctx: dict) -> None:  # noqa: ARG004
+        if not processing_enabled():
+            raise RuntimeError("Video processing is paused; use AccountWorkerSettings")
         configure_logging()
 
     job_timeout = 60 * 60
     keep_result = 60 * 60
+
+
+class AccountWorkerSettings(WorkerSettings):
+    """Keep account mail running without consuming the paused video queue."""
+
+    queue_name = "persona:account:queue"
+    functions = [dispatch_outbox]
+    cron_jobs = [cron(dispatch_outbox, second={0, 10, 20, 30, 40, 50}, run_at_startup=True)]
+
+    @staticmethod
+    async def on_startup(ctx: dict) -> None:  # noqa: ARG004
+        configure_logging()

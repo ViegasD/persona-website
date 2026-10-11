@@ -65,7 +65,9 @@ async def test_queue_retry_keeps_stable_job_identity(monkeypatch):
     session.execute = AsyncMock(return_value=SimpleNamespace(scalar_one_or_none=lambda: SimpleNamespace(id=12)))
     enqueue = AsyncMock(side_effect=[ConnectionError("redis unavailable"), None])
     monkeypatch.setattr(outbox, "get_pool", AsyncMock(return_value=SimpleNamespace(enqueue_job=enqueue)))
-    job = SimpleNamespace(id=19, kind="process_item", payload={"item_id": 12}, delivered_at=None, last_error=None)
+    from datetime import UTC, datetime
+    session.get = AsyncMock(return_value=SimpleNamespace(created_at=datetime.now(UTC)))
+    job = SimpleNamespace(id=19, order_id=1, kind="process_item", payload={"item_id": 12}, delivered_at=None, last_error=None)
     with pytest.raises(ConnectionError):
         await outbox.deliver_outbox_job(session, job)
     assert job.delivered_at is None

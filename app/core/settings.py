@@ -7,9 +7,10 @@ values use the ``STOREFRONT_`` prefix or distinct names.
 
 from __future__ import annotations
 
+from datetime import datetime
 from functools import lru_cache
 
-from pydantic import Field
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -68,6 +69,18 @@ class Settings(BaseSettings):
     batch_auto_threshold: int = Field(5, alias="BATCH_AUTO_THRESHOLD")
     batch_max_age_minutes: int = Field(60, alias="BATCH_MAX_AGE_MINUTES")
     batch_concurrency: int = Field(4, alias="BATCH_CONCURRENCY")
+    worker_enabled: bool = Field(False, alias="STOREFRONT_WORKER_ENABLED")
+    processing_start_at: datetime | None = Field(None, alias="STOREFRONT_PROCESSING_START_AT")
+    recovery_enabled: bool = Field(False, alias="STOREFRONT_RECOVERY_ENABLED")
+    whatsapp_delivery_enabled: bool = Field(False, alias="STOREFRONT_WHATSAPP_DELIVERY_ENABLED")
+
+    @model_validator(mode="after")
+    def validate_processing_window(self) -> Settings:
+        if self.processing_start_at is not None and self.processing_start_at.utcoffset() is None:
+            raise ValueError("STOREFRONT_PROCESSING_START_AT must include a timezone")
+        if self.worker_enabled and self.processing_start_at is None:
+            raise ValueError("Enabling processing requires STOREFRONT_PROCESSING_START_AT")
+        return self
 
     # --- Auth ---
     google_client_id: str | None = Field(None, alias="STOREFRONT_GOOGLE_CLIENT_ID")

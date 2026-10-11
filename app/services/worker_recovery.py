@@ -4,16 +4,22 @@ from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 from sqlalchemy import select
+from sqlalchemy.orm import selectinload
 
+from app.core.settings import get_settings
 from app.db.models import Order, OrderItem, OrderItemStatus, OrderStatus
 from app.db.session import session_scope
 from app.services.outbox import record_delivery_job, record_video_jobs
+from app.services.processing_policy import processing_enabled
 
 
 async def recover_interrupted_jobs(ctx: dict | None = None) -> None:
+    if not processing_enabled() or not get_settings().recovery_enabled:
+        return
     cutoff = datetime.now(UTC) - timedelta(minutes=75)
     async with session_scope() as session:
-        orders = (await session.execute(select(Order).where(
+        orders = (await session.execute(select(Order).options(selectinload(Order.plan)).where(
+            Order.created_at >= get_settings().processing_start_at,
             Order.status.in_([OrderStatus.PAID, OrderStatus.QUEUED, OrderStatus.GENERATING]),
             select(OrderItem.id).where(OrderItem.order_id == Order.id, OrderItem.updated_at < cutoff,
                 OrderItem.status.in_([OrderItemStatus.PENDING, OrderItemStatus.COMPOSITING,
@@ -21,7 +27,8 @@ async def recover_interrupted_jobs(ctx: dict | None = None) -> None:
         ).order_by(Order.id).limit(200).with_for_update(skip_locked=True))).scalars().all()
         for order in orders:
             all_items = (await session.execute(select(OrderItem).where(OrderItem.order_id == order.id))).scalars().all()
-            if all_items and all(item.status == OrderItemStatus.READY for item in all_items):
+            if (order.plan.video_count > 0 and len(all_items) == order.plan.video_count
+                    and all(item.status == OrderItemStatus.READY and item.video_s3_key for item in all_items)):
                 order.status = OrderStatus.READY
                 order.generated_at = datetime.now(UTC)
                 await record_delivery_job(session, order)

@@ -55,6 +55,7 @@ async def database(monkeypatch):
     engine = create_async_engine(url.replace("postgresql://", "postgresql+asyncpg://"))
     monkeypatch.setattr(get_settings(), "smtp_host", "smtp.test.invalid")
     monkeypatch.setattr(get_settings(), "smtp_from", "noreply@example.com")
+    monkeypatch.setattr("app.services.catalog_validation.validate_order_assets", AsyncMock())
     sessions = async_sessionmaker(engine, expire_on_commit=False)
     try:
         yield sessions
@@ -128,6 +129,116 @@ async def make_orders(database, balance=1, count=2):
             ids.append(order.id)
         await session.commit()
         return user.id, ids
+
+
+@pytest.mark.asyncio
+async def test_website_delivery_download_without_whatsapp_and_while_paused(database, monkeypatch):
+    from app.db.models import Delivery, DeliveryChannel
+    from app.services import delivery
+    user_id, ids = await make_orders(database, count=1)
+    monkeypatch.setattr(get_settings(), "evolution_api_url", None)
+    monkeypatch.setattr(get_settings(), "evolution_api_key", None)
+    monkeypatch.setattr(orders.storage, "presigned_get_url", lambda *args, **kwargs: "https://test.invalid/video.mp4")
+    async with database() as session:
+        order = await session.get(Order, ids[0])
+        item = (await session.execute(select(OrderItem).where(OrderItem.order_id == order.id))).scalar_one()
+        order.status = OrderStatus.READY
+        item.status = OrderItemStatus.READY
+        item.video_s3_key = "offline/video.mp4"
+        await session.commit()
+        first = await delivery.deliver_order(session, order.id)
+        await session.commit()
+        second = await delivery.deliver_order(session, order.id)
+        await session.commit()
+        assert first[0].id == second[0].id
+        records = (await session.execute(select(Delivery).where(Delivery.order_id == order.id))).scalars().all()
+        assert len(records) == 1 and records[0].channel == DeliveryChannel.ACCOUNT
+        assert order.status == OrderStatus.DELIVERED
+        monkeypatch.setattr(get_settings(), "worker_enabled", False)
+        assert await orders.download_item(order.id, item.id, user_id, [], session) == {"url": "https://test.invalid/video.mp4"}
+        assert await orders.download_item(order.id, item.id, None, [order.id], session) == {"url": "https://test.invalid/video.mp4"}
+        with pytest.raises(HTTPException) as denied:
+            await orders.download_item(order.id, item.id, None, [], session)
+        assert denied.value.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_historical_outbox_and_recovery_records_unchanged(database, monkeypatch):
+    _, ids = await make_orders(database, count=1)
+    async with database() as session:
+        order = await session.get(Order, ids[0])
+        order.status = OrderStatus.PAID
+        order.created_at = datetime(2020, 1, 1, tzinfo=UTC)
+        item = (await session.execute(select(OrderItem).where(OrderItem.order_id == order.id))).scalar_one()
+        item.updated_at = datetime(2020, 1, 1, tzinfo=UTC)
+        await outbox.record_video_jobs(session, order, [item.id])
+        await session.commit()
+        job = (await session.execute(select(OutboxJob).where(OutboxJob.order_id == order.id))).scalar_one()
+        job_id, item_id = job.id, item.id
+    monkeypatch.setattr(get_settings(), "processing_start_at", datetime.now(UTC))
+    monkeypatch.setattr(outbox, "session_scope", database)
+    monkeypatch.setattr(worker_recovery, "session_scope", database)
+    pool = AsyncMock()
+    monkeypatch.setattr(outbox, "get_pool", pool)
+    await outbox.dispatch_outbox()
+    await worker_recovery.recover_interrupted_jobs()
+    async with database() as session:
+        job = await session.get(OutboxJob, job_id)
+        item = await session.get(OrderItem, item_id)
+        assert job.attempts == 0 and job.delivered_at is None
+        assert item.status == OrderItemStatus.PENDING and item.attempts == 0
+        assert (await session.get(Order, ids[0])).status == OrderStatus.PAID
+    pool.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_draft_mutation_waits_for_checkout_lock_and_rechecks_status(database):
+    user_id, ids = await make_orders(database, count=1)
+    async with database() as checkout_session:
+        order = await orders._load_order(checkout_session, ids[0], user_id=user_id, guest_order_ids=[], lock=True)
+        item_id = order.items[0].id
+        async def delete_draft():
+            async with database() as session:
+                with pytest.raises(HTTPException) as blocked:
+                    await orders.delete_item(ids[0], item_id, user_id, [], session)
+                assert blocked.value.status_code == 409
+        mutation = asyncio.create_task(delete_draft())
+        await asyncio.sleep(0.05)
+        assert not mutation.done()
+        order.status = OrderStatus.PAID
+        await checkout_session.commit()
+        await asyncio.wait_for(mutation, timeout=5)
+    async with database() as session:
+        assert await session.get(OrderItem, item_id) is not None
+
+
+@pytest.mark.asyncio
+async def test_customer_media_and_admin_preview_are_separate(database, monkeypatch):
+    from app.api.v1 import media
+    from app.core import security
+    _, ids = await make_orders(database, count=1)
+    async with database() as session:
+        order = await session.get(Order, ids[0])
+        order.status = OrderStatus.PAID
+        item = (await session.execute(select(OrderItem).where(OrderItem.order_id == order.id))).scalar_one()
+        item.status = OrderItemStatus.AWAITING_APPROVAL
+        item.video_s3_key = "preview.mp4"
+        item_id = item.id
+        await session.commit()
+    monkeypatch.setattr(media, "session_scope", database)
+    monkeypatch.setattr(media.storage, "download_bytes", lambda key: b"offline-video")
+    with pytest.raises(HTTPException) as unavailable:
+        await media.proxy_media(security.sign_media_token(item_id))
+    assert unavailable.value.status_code == 404
+    preview_token = security.sign_media_preview_token(item_id)
+    assert security.verify_media_token(preview_token) is None
+    assert (await media.proxy_media(preview_token)).body == b"offline-video"
+    async with database() as session:
+        (await session.get(Order, ids[0])).status = OrderStatus.DELIVERED
+        (await session.get(OrderItem, item_id)).status = OrderItemStatus.READY
+        await session.commit()
+    monkeypatch.setattr(get_settings(), "worker_enabled", False)
+    assert (await media.proxy_media(security.sign_media_token(item_id))).body == b"offline-video"
 
 
 @pytest.mark.asyncio

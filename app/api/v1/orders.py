@@ -19,6 +19,7 @@ from app.db.models import (
     CreditTransactionType,
     Order,
     OrderItem,
+    OrderItemStatus,
     OrderStatus,
     Payment,
     PaymentStatus,
@@ -98,7 +99,8 @@ def _to_out(order: Order, *, guest_token: str | None = None) -> OrderOut:
         utm_term=order.utm_term,
         utm_sck=order.utm_sck,
         utm_src=order.utm_src,
-        items=[_item_to_out(i) for i in sorted(order.items, key=lambda x: x.sequence)],
+        items=[_item_to_out(i, delivered=order.status in {OrderStatus.READY, OrderStatus.DELIVERED})
+               for i in sorted(order.items, key=lambda x: x.sequence)],
         created_at=order.created_at,
         paid_at=order.paid_at,
         delivered_at=order.delivered_at,
@@ -106,12 +108,12 @@ def _to_out(order: Order, *, guest_token: str | None = None) -> OrderOut:
     )
 
 
-def _item_to_out(item: OrderItem) -> OrderItemOut:
+def _item_to_out(item: OrderItem, *, delivered: bool = True) -> OrderItemOut:
     settings = get_settings()
     api_base = settings.api_base_url.rstrip("/")
     video_url = None
     thumb_url = None
-    if item.video_s3_key:
+    if delivered and item.status == OrderItemStatus.READY and item.video_s3_key:
         token = sign_media_token(item.id)
         video_url = f"{api_base}/api/v1/media/{token}"
     if item.thumbnail_s3_key:
@@ -311,7 +313,7 @@ async def update_order(
     guest_order_ids: list[int] = Depends(get_guest_order_ids),
     session: AsyncSession = Depends(get_session),
 ) -> OrderOut:
-    order = await _load_order(session, order_id, user_id=user_id, guest_order_ids=guest_order_ids)
+    order = await _load_order(session, order_id, user_id=user_id, guest_order_ids=guest_order_ids, lock=True)
     _ensure_draft(order)
     data = payload.model_dump(exclude_unset=True)
     for key, value in data.items():
@@ -329,7 +331,7 @@ async def add_item(
     guest_order_ids: list[int] = Depends(get_guest_order_ids),
     session: AsyncSession = Depends(get_session),
 ) -> OrderItemOut:
-    order = await _load_order(session, order_id, user_id=user_id, guest_order_ids=guest_order_ids)
+    order = await _load_order(session, order_id, user_id=user_id, guest_order_ids=guest_order_ids, lock=True)
     _ensure_draft(order)
 
     if len(payload.character_ids) > order.plan.max_characters_per_video:
@@ -361,7 +363,7 @@ async def update_item(
     guest_order_ids: list[int] = Depends(get_guest_order_ids),
     session: AsyncSession = Depends(get_session),
 ) -> OrderItemOut:
-    order = await _load_order(session, order_id, user_id=user_id, guest_order_ids=guest_order_ids)
+    order = await _load_order(session, order_id, user_id=user_id, guest_order_ids=guest_order_ids, lock=True)
     _ensure_draft(order)
 
     item = next((i for i in order.items if i.id == item_id), None)
@@ -391,7 +393,7 @@ async def delete_item(
     guest_order_ids: list[int] = Depends(get_guest_order_ids),
     session: AsyncSession = Depends(get_session),
 ) -> Response:
-    order = await _load_order(session, order_id, user_id=user_id, guest_order_ids=guest_order_ids)
+    order = await _load_order(session, order_id, user_id=user_id, guest_order_ids=guest_order_ids, lock=True)
     _ensure_draft(order)
     item = next((i for i in order.items if i.id == item_id), None)
     if item is None:
@@ -420,7 +422,7 @@ async def fill_items(
     This endpoint clears existing DRAFT items and re-creates them so a single
     call is sufficient regardless of how many videos the plan includes.
     """
-    order = await _load_order(session, order_id, user_id=user_id, guest_order_ids=guest_order_ids, guest_token=x_guest_token)
+    order = await _load_order(session, order_id, user_id=user_id, guest_order_ids=guest_order_ids, guest_token=x_guest_token, lock=True)
     _ensure_draft(order)
 
     slots = payload.video_slots[: order.plan.video_count]
@@ -489,6 +491,8 @@ async def checkout(
     session: AsyncSession = Depends(get_session),
 ) -> OrderCheckoutOut:
     settings = get_settings()
+    from app.services.catalog_validation import validate_order_assets
+    from app.services.processing_policy import processing_allowed
     order = await _load_order(session, order_id, user_id=user_id, guest_order_ids=guest_order_ids, guest_token=x_guest_token, lock=True)
 
     if order.status not in {OrderStatus.DRAFT, OrderStatus.AWAITING_PAYMENT}:
@@ -498,6 +502,10 @@ async def checkout(
             status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=f"order needs exactly {order.plan.video_count} items (has {len(order.items)})",
         )
+
+    if not processing_allowed(order):
+        raise HTTPException(503, detail="video processing is temporarily unavailable")
+    await validate_order_assets(session, order)
 
     if card is not None and card.use_credits:
         if user_id is None or order.user_id != user_id:
@@ -685,6 +693,7 @@ async def download_item(
     if order.status == OrderStatus.REFUNDED:
         raise HTTPException(status.HTTP_403_FORBIDDEN, detail="order refunded")
     item = next((i for i in order.items if i.id == item_id), None)
-    if item is None or not item.video_s3_key:
+    if (order.status not in {OrderStatus.READY, OrderStatus.DELIVERED} or item is None
+            or item.status != OrderItemStatus.READY or not item.video_s3_key):
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="video not ready")
     return {"url": storage.presigned_get_url(item.video_s3_key, expires_in=3600)}

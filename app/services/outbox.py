@@ -2,13 +2,15 @@
 
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import select
+from sqlalchemy import and_, false, or_, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.settings import get_settings
 from app.db.models import Order, OrderItem, OrderItemStatus, OrderStatus, OutboxJob
 from app.db.session import session_scope
 from app.services.account_mail import send_account_email
+from app.services.processing_policy import processing_allowed, processing_enabled
 from app.workers.queue import get_pool
 
 
@@ -28,12 +30,20 @@ async def record_delivery_job(session: AsyncSession, order: Order) -> None:
 
 
 async def deliver_outbox_job(session: AsyncSession, job: OutboxJob) -> None:
+    if job.kind != "account_email":
+        if not processing_enabled():
+            return
+        order = await session.get(Order, job.order_id)
+        if order is None or not processing_allowed(order):
+            return
     if job.kind == "account_email":
         await send_account_email(job.payload)
         job.payload = {}  # Remove the raw email link after successful delivery.
     elif job.kind == "deliver_order":
         from app.services.delivery import deliver_order
-        await deliver_order(session, job.order_id)
+        records = await deliver_order(session, job.order_id)
+        if not records:
+            raise RuntimeError("order is not ready for website delivery")
     elif job.kind in {"process_item", "generate_video"}:
         item = (await session.execute(select(OrderItem).join(Order).where(
             OrderItem.id == job.payload["item_id"],
@@ -53,10 +63,16 @@ async def deliver_outbox_job(session: AsyncSession, job: OutboxJob) -> None:
 
 
 async def dispatch_outbox(ctx: dict | None = None) -> None:
+    eligible = false()
+    if processing_enabled():
+        eligible = and_(OutboxJob.kind.in_(["process_item", "generate_video", "deliver_order"]),
+                        select(Order.id).where(Order.id == OutboxJob.order_id,
+                            Order.created_at >= get_settings().processing_start_at).exists())
     for _ in range(50):
         async with session_scope() as session:
             job = (await session.execute(select(OutboxJob).where(
                 OutboxJob.delivered_at.is_(None), OutboxJob.available_at <= datetime.now(UTC),
+                or_(OutboxJob.kind == "account_email", eligible),
             ).order_by(OutboxJob.id).limit(1).with_for_update(skip_locked=True))).scalar_one_or_none()
             if job is None:
                 break
