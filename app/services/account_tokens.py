@@ -7,20 +7,15 @@ from urllib.parse import quote
 
 from fastapi import HTTPException
 from sqlalchemy import select, update
-from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.settings import get_settings
 from app.db.models import (
     AccountToken,
-    CreditTransaction,
-    CreditTransactionType,
     OutboxJob,
     User,
-    WelcomeCreditClaim,
 )
 from app.services.account_mail import mail_is_configured
-from app.services.credits import apply_credit
 
 
 def token_digest(token: str) -> str:
@@ -93,18 +88,5 @@ async def verify_account(session: AsyncSession, raw: str) -> User:
 
 
 async def grant_welcome_credit(session: AsyncSession, user: User) -> None:
-    # Older signups have already received the bonus; do not award it twice.
-    existing_bonus = (await session.execute(select(CreditTransaction.id).where(
-        CreditTransaction.user_id == user.id,
-        CreditTransaction.kind == CreditTransactionType.SIGNUP_BONUS,
-    ).limit(1))).scalar_one_or_none()
-    claim = (await session.execute(insert(WelcomeCreditClaim).values(
-        identity_hash=welcome_identity(user.email), user_id=user.id,
-    ).on_conflict_do_nothing().returning(WelcomeCreditClaim.user_id))).scalar_one_or_none()
-    if claim is not None and existing_bonus is None:
-        apply_credit(user, 1)
-        session.add(CreditTransaction(
-            user_id=user.id, kind=CreditTransactionType.SIGNUP_BONUS, amount=1,
-            balance_after=user.credit_balance, debt_after=user.credit_debt,
-            note="Credito de boas-vindas apos verificar e-mail",
-        ))
+    """Retired reward hook, including Google login: verification grants no credits."""
+    return

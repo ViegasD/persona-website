@@ -19,3 +19,19 @@ os.environ.setdefault("XAI_API_KEY", "offline-test-key")
 os.environ.setdefault("STOREFRONT_WORKER_ENABLED", "true")
 os.environ.setdefault("STOREFRONT_PROCESSING_START_AT", "2000-01-01T00:00:00+00:00")
 os.environ.setdefault("STOREFRONT_RECOVERY_ENABLED", "true")
+
+import pytest
+from unittest.mock import Mock
+from app.services import storefront_policy
+
+
+@pytest.fixture(autouse=True)
+def isolate_policy_for_component_mocks(monkeypatch, request):
+    if request.node.path.name == "test_storefront_policy.py":
+        return
+    original = storefront_policy.read_policy
+    async def read(session):
+        if isinstance(session, Mock):
+            return storefront_policy.PolicyValues()
+        return await original(session)
+    monkeypatch.setattr(storefront_policy, "read_policy", read)

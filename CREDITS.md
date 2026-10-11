@@ -7,11 +7,11 @@ bot repository is not part of this release.
 
 ## Current Policy
 
-- Registration starts with zero credits. Email verification grants one
-  welcome credit per canonical email identity. Gmail dots, plus aliases and
-  googlemail addresses share a claim. Legacy signup claims are backfilled.
-- A paid Pix or card order grants one return credit to its account.
-- One video costs one credit. Credit redemptions do not earn return credits.
+- Registration, email verification and Google sign-in grant zero credits.
+- Paid video orders grant no bonus credits. Free credits are prohibited.
+- One video costs one credit. Standalone paid credit purchases are not yet
+  implemented; the current credit API only exposes balance/history and redemption.
+- Historical balances, ledger records and welcome-claim tables are preserved.
 - Balances cannot go negative; each order can have only one transaction of
   each ledger kind. Order and account locks serialize checkout and rewards.
 - Existing accounts start with zero credits. Historical purchases are not
@@ -25,7 +25,7 @@ bot repository is not part of this release.
 
 Google signup/login and authenticated account linking are implemented.
 Activation/security details are in [GOOGLE_AUTH.md](GOOGLE_AUTH.md).
-Both login methods share the same account and canonical welcome-credit claim.
+Both login methods share the same account; neither grants any credits.
 
 Customers can register or log in during checkout, select credits, see their
 balance, and sign out. The waiting page carries account authentication.
@@ -38,10 +38,15 @@ balance/debt and credit history. Confirmation links expire in 24 hours;
 reset links in 30 minutes. Tokens are hashed and single-use. Browser
 fragments clear immediately; resets revoke existing sessions. Email
 requests have a 60-second per-account/purpose cooldown.
-`GET /api/v1/config` exposes only public keys and boolean email/processing
+`GET /api/v1/config` exposes only public keys and safe email/processing
 availability flags, with no-store caching. Account and checkout screens explain
 unavailable signup/email delivery and paused generation without bypassing
 verification or changing balances. Google buttons remain commented out.
+The admin panel's storefront settings control registration, credit redemption,
+accepting new orders and mandatory account checkout, independently of the legacy
+bot settings. Defaults preserve existing checkout access. Deployment-level worker
+flags and historical cutoff remain hard limits, never editable through this API.
+Settings saves use optimistic revision checks. Free-credit policy is fixed at zero.
 Guest contact lookup requires a signed guest-order token or account access.
 Guest claiming requires login, matching email, and signed order ownership.
 

@@ -17,7 +17,7 @@ def valid_assets(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_purchase_award_is_not_repeated():
+async def test_purchases_never_award_free_credits():
     user = SimpleNamespace(id=1, credit_balance=2)
     order = SimpleNamespace(id=3, user_id=1)
     session = MagicMock()
@@ -29,12 +29,9 @@ async def test_purchase_award_is_not_repeated():
     ])
     await grant_paid_order_credit(session, order)
     await grant_paid_order_credit(session, order)
-    assert user.credit_balance == 3
-    assert session.add.call_count == 1
-    transaction = session.add.call_args.args[0]
-    assert transaction.amount == 1
-    assert transaction.balance_after == 3
-    assert transaction.kind == CreditTransactionType.PURCHASE
+    assert user.credit_balance == 2
+    session.add.assert_not_called()
+    session.execute.assert_not_awaited()
 
 
 @pytest.mark.asyncio

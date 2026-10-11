@@ -39,24 +39,5 @@ async def reverse_order_credits(session: AsyncSession, order: Order) -> None:
 
 
 async def grant_paid_order_credit(session: AsyncSession, order: Order) -> None:
-    if order.user_id is None:
-        return
-    # Serialize ledger changes before checking for an existing award.
-    user = (await session.execute(
-        select(User).where(User.id == order.user_id).with_for_update().execution_options(populate_existing=True)
-    )).scalar_one_or_none()
-    if user is None:
-        return
-    existing = (await session.execute(select(CreditTransaction).where(
-        CreditTransaction.order_id == order.id,
-        CreditTransaction.kind == CreditTransactionType.PURCHASE,
-    ))).scalar_one_or_none()
-    if existing is not None:
-        return
-    apply_credit(user, 1)
-    session.add(CreditTransaction(
-        user_id=user.id, order_id=order.id,
-        kind=CreditTransactionType.PURCHASE, amount=1,
-        balance_after=user.credit_balance, debt_after=user.credit_debt,
-        note="Credito de retorno por compra paga",
-    ))
+    """Retired reward hook: purchases never grant free credits."""
+    return

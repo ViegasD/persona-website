@@ -97,6 +97,9 @@ async def authenticate(session: AsyncSession, credential: str, nonce: str, link_
             raise HTTPException(409, detail="Use a conta Google com o mesmo e-mail da sua conta.")
         user.google_sub = claims["sub"]
     elif user is None:
+        from app.services import storefront_policy
+        if not (await storefront_policy.read_policy(session)).registration_enabled:
+            raise HTTPException(503, detail="registration temporarily unavailable")
         existing = (await session.execute(select(User.id).where(func.lower(User.email) == claims["email"]))).scalar_one_or_none()
         if existing is not None:
             raise HTTPException(409, detail="Entre com sua senha e vincule o Google em Minha conta.")

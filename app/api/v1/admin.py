@@ -32,8 +32,35 @@ from app.services import batch_collector, mercadopago_client, storage
 from app.services.credits import reverse_order_credits
 from app.services.outbox import record_delivery_job, record_video_jobs
 from app.services.processing_policy import processing_allowed
+from app.services import storefront_policy
+from app.services.account_mail import mail_is_configured
+from app.core.settings import get_settings
+from app.services.processing_policy import processing_enabled
 
 router = APIRouter(prefix="/admin", tags=["admin"], dependencies=[Depends(require_admin_key)])
+
+
+@router.get("/storefront-settings")
+async def storefront_settings(session: AsyncSession = Depends(get_session)) -> dict:
+    settings = get_settings()
+    return {
+        "policy": (await storefront_policy.read_policy(session)).model_dump(),
+        "status": {
+            "processing_enabled": processing_enabled(),
+            "processing_start_at": settings.processing_start_at,
+            "recovery_enabled": settings.recovery_enabled,
+            "account_email_enabled": mail_is_configured(),
+            "whatsapp_delivery_enabled": settings.whatsapp_delivery_enabled,
+            "signup_bonus": 0, "purchase_bonus": 0, "credits_per_video": 1,
+            "credit_purchase_enabled": False,
+        },
+    }
+
+
+@router.put("/storefront-settings", response_model=storefront_policy.PolicyValues)
+async def save_storefront_settings(payload: storefront_policy.PolicyValues,
+                                  session: AsyncSession = Depends(get_session)):
+    return await storefront_policy.write_policy(session, payload)
 
 
 def _require_processing(order: Order) -> None:
@@ -68,6 +95,8 @@ async def update_plan(
     if plan is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND)
     for k, v in payload.model_dump(exclude_unset=True).items():
+        if v is None and k in {"name", "price_cents", "video_count", "max_characters_per_video", "personalization_level", "is_subscription", "sort_order", "is_active"}:
+            raise HTTPException(422, detail=f"{k} cannot be null")
         setattr(plan, k, v)
     await session.commit()
     await session.refresh(plan)

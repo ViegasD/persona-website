@@ -70,6 +70,25 @@ async def latest_link(session, user_id, purpose):
 
 
 @pytest.mark.asyncio
+async def test_admin_policy_concurrent_save_and_no_customer_mutation(database):
+    from app.services import storefront_policy
+    async with database() as session:
+        original = await storefront_policy.read_policy(session)
+    async def save():
+        async with database() as session:
+            try:
+                await storefront_policy.write_policy(session, original.model_copy(update={'registration_enabled': False}))
+                return 200
+            except HTTPException as error:
+                return error.status_code
+    assert sorted(await asyncio.gather(save(), save())) == [200, 409]
+    async with database() as session:
+        current = await storefront_policy.read_policy(session)
+        assert not current.registration_enabled
+        await storefront_policy.write_policy(session, original.model_copy(update={'revision': current.revision}))
+
+
+@pytest.mark.asyncio
 async def test_verified_signup_reset_and_session_revocation(database):
     email = f"person-{uuid.uuid4().hex}@example.com"
     async with database() as session:
@@ -78,7 +97,7 @@ async def test_verified_signup_reset_and_session_revocation(database):
         assert user.credit_balance == 0 and user.email_verified_at is None
         raw = await latest_link(session, user.id, "verify")
         await auth.verify_email(AccountTokenIn(token=raw), session)
-        assert user.credit_balance == 1 and user.email_verified_at is not None
+        assert user.credit_balance == 0 and user.email_verified_at is not None
         with pytest.raises(HTTPException) as replay:
             await auth.verify_email(AccountTokenIn(token=raw), session)
         assert replay.value.status_code == 400
@@ -94,7 +113,7 @@ async def test_verified_signup_reset_and_session_revocation(database):
 
 
 @pytest.mark.asyncio
-async def test_expired_verification_and_gmail_bonus_identity(database):
+async def test_expired_verification_and_gmail_accounts_without_bonus(database):
     local = uuid.uuid4().hex
     async with database() as session:
         first = await auth.register(RegisterIn(email=f"{local}@gmail.com", password="Original123"), session)
@@ -273,8 +292,10 @@ async def test_concurrent_awards_and_refund_replay(database):
     await asyncio.gather(award(), award())
     async with database() as session:
         user = await session.get(User, user_id)
-        assert user.credit_balance == 1
-        user.credit_balance = 0  # Spend the reward before the cash order is refunded.
+        assert user.credit_balance == 0
+        # Preserve refund coverage for rewards issued before the no-free-credit policy.
+        session.add(CreditTransaction(user_id=user_id, order_id=order_ids[0],
+            kind=CreditTransactionType.PURCHASE, amount=1, balance_after=1, debt_after=0))
         await session.commit()
         order = await session.get(Order, order_ids[0])
         await reverse_order_credits(session, order)
@@ -325,7 +346,10 @@ async def test_refunds_only_cancel_funding_payment_and_full_amount(database, mon
     async with database() as session:
         order = await session.get(Order, ids[0])
         order.status = OrderStatus.PAID
-        await grant_paid_order_credit(session, order)
+        user = await session.get(User, user_id)
+        user.credit_balance = 1
+        session.add(CreditTransaction(user_id=user_id, order_id=order.id,
+            kind=CreditTransactionType.PURCHASE, amount=1, balance_after=1, debt_after=0))
         funding = Payment(order_id=order.id, provider="mercadopago", provider_id=uuid.uuid4().hex,
                           status=PaymentStatus.APPROVED, amount_cents=1990, funds_order=True)
         duplicate = Payment(order_id=order.id, provider="mercadopago", provider_id=uuid.uuid4().hex,
@@ -469,7 +493,7 @@ async def test_google_signup_login_subject_and_nonce_replay(database, monkeypatc
     user_id, nonce = await google_attempt(database, monkeypatch, subject, email)
     async with database() as session:
         user = await session.get(User, user_id)
-        assert user.credit_balance == 1 and user.email_verified_at is not None
+        assert user.credit_balance == 0 and user.email_verified_at is not None
         assert user.password_hash is None and user.google_sub == subject
         with pytest.raises(HTTPException) as replay:
             await google_auth.authenticate(session, "mock-google-credential", nonce)
@@ -478,7 +502,7 @@ async def test_google_signup_login_subject_and_nonce_replay(database, monkeypatc
     assert again == user_id
     async with database() as session:
         user = await session.get(User, user_id)
-        assert user.email == email and user.credit_balance == 1
+        assert user.email == email and user.credit_balance == 0
 
 
 @pytest.mark.asyncio
@@ -496,7 +520,7 @@ async def test_google_cannot_implicitly_link_password_account(database, monkeypa
     assert linked == issued.user_id
     async with database() as session:
         user = await session.get(User, linked)
-        assert user.credit_balance == 1 and user.google_sub == subject
+        assert user.credit_balance == 0 and user.google_sub == subject
         assert user.password_hash is not None
 
 
@@ -506,7 +530,7 @@ async def test_google_alias_signup_cannot_duplicate_bonus(database, monkeypatch)
     first, _ = await google_attempt(database, monkeypatch, uuid.uuid4().hex, local + "@gmail.com")
     second, _ = await google_attempt(database, monkeypatch, uuid.uuid4().hex, local + "+alias@gmail.com")
     async with database() as session:
-        assert (await session.get(User, first)).credit_balance == 1
+        assert (await session.get(User, first)).credit_balance == 0
         assert (await session.get(User, second)).credit_balance == 0
 
 
@@ -519,7 +543,7 @@ async def test_google_third_party_email_needs_our_verification(database, monkeyp
         assert user.email_verified_at is None and user.credit_balance == 0
         raw = await latest_link(session, user_id, "verify")
         await auth.verify_email(AccountTokenIn(token=raw), session)
-        assert user.credit_balance == 1
+        assert user.credit_balance == 0
 
 
 @pytest.mark.asyncio
@@ -550,12 +574,12 @@ async def test_google_http_contract_and_authenticated_link(database, monkeypatch
         assert result.status_code == 200
         token = result.json()["access_token"]
         me = (await client.get('/auth/me', headers={"Authorization": "Bearer " + token})).json()
-        assert me["google_linked"] and me["email_verified"] and me["credit_balance"] == 1
+        assert me["google_linked"] and me["email_verified"] and me["credit_balance"] == 0
         assert (await client.post('/auth/google/login', json=payload)).status_code == 401
 
 
 @pytest.mark.asyncio
-async def test_concurrent_google_signup_creates_one_account_and_bonus(database, monkeypatch):
+async def test_concurrent_google_signup_creates_one_account_without_bonus(database, monkeypatch):
     from app.services import google_auth
 
     subject, email = uuid.uuid4().hex, uuid.uuid4().hex + "@gmail.com"
@@ -572,9 +596,9 @@ async def test_concurrent_google_signup_creates_one_account_and_bonus(database, 
     assert ids[0] == ids[1]
     async with database() as session:
         user = await session.get(User, ids[0])
-        assert user.credit_balance == 1
+        assert user.credit_balance == 0
         txs = (await session.execute(select(CreditTransaction).where(CreditTransaction.user_id == user.id))).scalars().all()
-        assert len(txs) == 1
+        assert len(txs) == 0
 
 
 @pytest.mark.asyncio

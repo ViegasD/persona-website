@@ -40,6 +40,7 @@ from app.schemas.v1 import (
 )
 from app.services import mercadopago_client, storage
 from app.services.credits import grant_paid_order_credit
+from app.services import storefront_policy
 from app.services.meta_capi_client import report_initiate_checkout, report_purchase
 from app.services.outbox import record_video_jobs
 
@@ -505,6 +506,13 @@ async def checkout(
 
     if not processing_allowed(order):
         raise HTTPException(503, detail="video processing is temporarily unavailable")
+    policy = await storefront_policy.read_policy(session)
+    if not policy.new_orders_enabled:
+        raise HTTPException(503, detail="new orders temporarily unavailable")
+    if policy.require_account_checkout and user_id is None:
+        raise HTTPException(401, detail="login required for checkout")
+    if card is not None and card.use_credits and not policy.credit_redemption_enabled:
+        raise HTTPException(503, detail="credit redemption temporarily unavailable")
     await validate_order_assets(session, order)
 
     if card is not None and card.use_credits:

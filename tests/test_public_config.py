@@ -7,6 +7,8 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from app.api.v1 import config
+from app.db.session import get_session
+from unittest.mock import MagicMock
 
 
 @pytest.mark.parametrize("mail,processing", [(False, False), (True, False), (True, True)])
@@ -16,6 +18,7 @@ def test_public_config_reports_availability_without_secrets(monkeypatch, mail, p
     monkeypatch.setattr(config, "processing_enabled", lambda: processing)
     app = FastAPI()
     app.include_router(config.router)
+    app.dependency_overrides[get_session] = lambda: MagicMock()
     with TestClient(app) as client:
         response = client.get("/config")
     assert response.status_code == 200
@@ -24,4 +27,8 @@ def test_public_config_reports_availability_without_secrets(monkeypatch, mail, p
         "mp_public_key": "public-key",
         "account_email_enabled": mail,
         "video_processing_enabled": processing,
+        "registration_enabled": True,
+        "credit_redemption_enabled": True,
+        "require_account_checkout": False,
+        "signup_bonus": 0, "purchase_bonus": 0,
     }

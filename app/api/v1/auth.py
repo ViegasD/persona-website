@@ -30,6 +30,7 @@ from app.schemas.v1 import (
     UserOut,
 )
 from app.services import google_auth
+from app.services import storefront_policy
 from app.services.account_mail import mail_is_configured
 from app.services.account_tokens import consume_account_token, issue_account_token, verify_account
 
@@ -67,6 +68,8 @@ async def google_link(payload: GoogleCredentialIn, user_id: int = Depends(requir
 
 @router.post("/register", response_model=TokenOut)
 async def register(payload: RegisterIn, session: AsyncSession = Depends(get_session)) -> TokenOut:
+    if not (await storefront_policy.read_policy(session)).registration_enabled:
+        raise HTTPException(503, detail="registration temporarily unavailable")
     email = str(payload.email).lower()
     existing = (
         await session.execute(select(User).where(func.lower(User.email) == email))

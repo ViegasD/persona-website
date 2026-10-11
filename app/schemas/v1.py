@@ -37,6 +37,7 @@ class PlanOut(BaseModel):
     billing_period: BillingPeriod | None
     features: list[str] | None = None
     sort_order: int
+    is_active: bool = True
 
 
 class PlanCreate(BaseModel):
@@ -57,9 +58,9 @@ class PlanCreate(BaseModel):
 class PlanUpdate(BaseModel):
     name: str | None = None
     description: str | None = None
-    price_cents: int | None = None
-    video_count: int | None = None
-    max_characters_per_video: int | None = None
+    price_cents: int | None = Field(None, ge=1)
+    video_count: int | None = Field(None, ge=1, le=20)
+    max_characters_per_video: int | None = Field(None, ge=1, le=4)
     personalization_level: PersonalizationLevel | None = None
     is_subscription: bool | None = None
     billing_period: BillingPeriod | None = None

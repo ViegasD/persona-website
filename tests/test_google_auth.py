@@ -102,7 +102,7 @@ async def test_google_transport_failure_remains_temporarily_unavailable(monkeypa
 @pytest.mark.asyncio
 @pytest.mark.parametrize("link", [True, False], ids=["explicit-link", "stable-sub-login"])
 @pytest.mark.parametrize("domain,authority", [("gmail.com", {}), ("company.com", {"hd": "company.com"})])
-async def test_legacy_mixed_case_email_gets_verified_and_one_welcome_credit(monkeypatch, link, domain, authority):
+async def test_legacy_mixed_case_email_gets_verified_without_free_credits(monkeypatch, link, domain, authority):
     stored_email = "Legacy.Person@" + domain.upper()
     user = User(id=17, email=stored_email, google_sub=None if link else "stable-sub",
                 token_version=0, credit_balance=0, credit_debt=0)
@@ -115,7 +115,7 @@ async def test_legacy_mixed_case_email_gets_verified_and_one_welcome_credit(monk
     values = ["nonce-hash", None, None, None if link else user]
     if link:
         values.append(user)
-    values += [None, user.id, "next-nonce-hash", None, None, user, 23, None]
+    values += ["next-nonce-hash", None, None, user]
     session.execute.side_effect = [SimpleNamespace(scalar_one_or_none=lambda value=value: value,
                                                   scalar_one=lambda value=value: value) for value in values]
 
@@ -123,17 +123,14 @@ async def test_legacy_mixed_case_email_gets_verified_and_one_welcome_credit(monk
                                             expected_token_version=0 if link else None)
     assert result is user
     assert user.email_verified_at is not None
-    assert user.credit_balance == 1
+    assert user.credit_balance == 0
     assert user.email == stored_email and user.google_sub == "stable-sub"
     verified_at = user.email_verified_at
 
     await google_auth.authenticate(session, "credential", "next-nonce")
     assert user.email_verified_at == verified_at
-    assert user.credit_balance == 1
-    assert len(added) == 1
-    transaction = added[0]
-    assert transaction.user_id == 17 and transaction.kind == CreditTransactionType.SIGNUP_BONUS
-    assert transaction.amount == 1 and transaction.balance_after == 1
+    assert user.credit_balance == 0
+    assert added == []
 
 
 @pytest.mark.asyncio

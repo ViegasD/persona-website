@@ -43,6 +43,19 @@ class Base(DeclarativeBase):
     metadata = MetaData(schema=SCHEMA)
 
 
+class StorefrontPolicy(Base):
+    __tablename__ = "storefront_policy"
+    __table_args__ = (CheckConstraint("id = 1", name="single_storefront_policy"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    revision: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    new_orders_enabled: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
+    registration_enabled: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
+    credit_redemption_enabled: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
+    require_account_checkout: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
 # ─────────────────────────── Enums ──────────────────────────────────────────
 
 
