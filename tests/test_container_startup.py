@@ -1,8 +1,14 @@
 """Guard standalone container startup ordering."""
 
+import tomllib
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_async_database_dependencies_are_explicit():
+    project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    assert any(dependency.startswith("sqlalchemy[asyncio]") for dependency in project["project"]["dependencies"])
 
 
 def test_container_uses_startup_script():
