@@ -40,7 +40,7 @@ async def test_insufficient_credits_cannot_start_processing(monkeypatch, balance
     user = SimpleNamespace(id=1, credit_balance=balance, email_verified_at=True)
     order = SimpleNamespace(
         id=3, user_id=1, status=OrderStatus.DRAFT, created_at=datetime.now(UTC),
-        plan=SimpleNamespace(video_count=needed),
+        plan=SimpleNamespace(video_count=needed, slug="teste", is_active=True),
         items=[SimpleNamespace(id=i) for i in range(needed)],
     )
     session = MagicMock()
@@ -58,7 +58,7 @@ async def test_insufficient_credits_cannot_start_processing(monkeypatch, balance
 async def test_redeeming_credits_records_debit_and_no_purchase_reward(monkeypatch):
     user = SimpleNamespace(id=1, credit_balance=3, email_verified_at=True)
     order = SimpleNamespace(id=3, user_id=1, status=OrderStatus.DRAFT, created_at=datetime.now(UTC),
-                            plan=SimpleNamespace(video_count=2),
+                            plan=SimpleNamespace(video_count=2, slug="surpresa", is_active=True),
                             items=[SimpleNamespace(id=10), SimpleNamespace(id=11)])
     session = MagicMock()
     session.execute = AsyncMock(return_value=SimpleNamespace(scalar_one_or_none=lambda: user))

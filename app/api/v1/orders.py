@@ -43,6 +43,7 @@ from app.services.credits import grant_paid_order_credit
 from app.services import storefront_policy
 from app.services.meta_capi_client import report_initiate_checkout, report_purchase
 from app.services.outbox import record_video_jobs
+from app.services.plan_availability import plan_is_available
 
 router = APIRouter(prefix="/orders", tags=["orders"])
 
@@ -223,7 +224,7 @@ async def create_order(
     session: AsyncSession = Depends(get_session),
 ) -> OrderOut:
     plan = (await session.execute(select(Plan).where(Plan.slug == payload.plan_id))).scalar_one_or_none()
-    if plan is None or not plan.is_active:
+    if plan is None or not plan_is_available(plan):
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="plan not found or inactive")
 
     # Resolve affiliate code (silently ignore invalid/inactive codes)
@@ -498,6 +499,8 @@ async def checkout(
 
     if order.status not in {OrderStatus.DRAFT, OrderStatus.AWAITING_PAYMENT}:
         raise HTTPException(status.HTTP_409_CONFLICT, detail=f"cannot checkout in status {order.status}")
+    if not plan_is_available(order.plan):
+        raise HTTPException(status.HTTP_409_CONFLICT, detail="plan not available for checkout")
     if len(order.items) != order.plan.video_count:
         raise HTTPException(
             status.HTTP_422_UNPROCESSABLE_ENTITY,

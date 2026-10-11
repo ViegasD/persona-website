@@ -20,7 +20,7 @@ def valid_assets(monkeypatch):
 async def test_approved_card_records_payment_and_durable_jobs(monkeypatch):
     order = SimpleNamespace(
         id=10, user_id=None, status=OrderStatus.DRAFT, created_at=datetime.now(UTC),
-        plan=SimpleNamespace(video_count=1), items=[SimpleNamespace(id=20)],
+        plan=SimpleNamespace(video_count=1, slug="teste", is_active=True), items=[SimpleNamespace(id=20)],
         total_cents=1000, guest_email="buyer@example.com", guest_phone=None, paid_at=None,
     )
     session = MagicMock()
@@ -56,7 +56,7 @@ async def test_approved_card_records_payment_and_durable_jobs(monkeypatch):
 async def test_card_selection_does_not_reuse_pix(monkeypatch):
     order = SimpleNamespace(
         id=10, user_id=None, status=OrderStatus.DRAFT, created_at=datetime.now(UTC),
-        plan=SimpleNamespace(video_count=1), items=[SimpleNamespace(id=20)],
+        plan=SimpleNamespace(video_count=1, slug="teste", is_active=True), items=[SimpleNamespace(id=20)],
         total_cents=1000, guest_email="buyer@example.com",
     )
     pending_pix = SimpleNamespace(id=99, qr_code_payload="pix", ticket_url=None,

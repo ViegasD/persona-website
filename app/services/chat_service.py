@@ -356,6 +356,7 @@ async def _create_order_and_checkout(
     """Create the DB order, items, and Pix payment. Returns PaymentInfo on success."""
     from app.db.models import Order, OrderItem, OrderStatus, Payment, PaymentStatus, Plan
     from app.services import mercadopago_client
+    from app.services.plan_availability import plan_is_available
 
     # Resolve plan
     plan = (
@@ -363,7 +364,7 @@ async def _create_order_and_checkout(
             select(Plan).where(Plan.slug == state.plan_slug, Plan.is_active.is_(True))
         )
     ).scalar_one_or_none()
-    if plan is None:
+    if plan is None or not plan_is_available(plan):
         return None
 
     # Create order

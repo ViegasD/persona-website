@@ -86,7 +86,7 @@ def test_admin_settings_require_key_and_never_expose_secrets(monkeypatch):
 async def test_checkout_enforces_admin_rules_before_payment(monkeypatch, values, user_id, use_credits, expected):
     monkeypatch.setattr(policy, 'read_policy', AsyncMock(return_value=policy.PolicyValues(**values)))
     monkeypatch.setattr('app.services.processing_policy.processing_allowed', lambda order: True)
-    order = SimpleNamespace(status=OrderStatus.DRAFT, plan=SimpleNamespace(video_count=1), items=[SimpleNamespace(id=1)])
+    order = SimpleNamespace(status=OrderStatus.DRAFT, plan=SimpleNamespace(video_count=1, slug="teste", is_active=True), items=[SimpleNamespace(id=1)])
     monkeypatch.setattr(orders, '_load_order', AsyncMock(return_value=order))
     session = MagicMock()
     with pytest.raises(HTTPException) as blocked:

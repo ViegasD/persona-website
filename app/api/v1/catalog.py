@@ -10,6 +10,7 @@ from app.db.models import Plan
 from app.db.session import get_session
 from app.schemas.v1 import CharacterOut as BaseCharacterOut
 from app.schemas.v1 import OccasionOut, PlanOut
+from app.services.plan_availability import RETIRED_PLAN_SLUGS
 
 
 class CharacterOut(BaseCharacterOut):
@@ -22,7 +23,9 @@ router = APIRouter(prefix="/catalog", tags=["catalog"])
 
 @router.get("/plans", response_model=list[PlanOut])
 async def list_plans(session: AsyncSession = Depends(get_session)) -> list[Plan]:
-    stmt = select(Plan).where(Plan.is_active.is_(True)).order_by(Plan.sort_order, Plan.id)
+    stmt = select(Plan).where(
+        Plan.is_active.is_(True), Plan.slug.not_in(RETIRED_PLAN_SLUGS)
+    ).order_by(Plan.sort_order, Plan.id)
     return list((await session.execute(stmt)).scalars().all())
 
 

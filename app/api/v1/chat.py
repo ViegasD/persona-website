@@ -40,6 +40,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.models import Plan
 from app.db.session import get_session
 from app.services.chat_service import ChatReply, chat_turn, clear_session
+from app.services.plan_availability import RETIRED_PLAN_SLUGS
 
 router = APIRouter(prefix="/chat", tags=["chat"])
 
@@ -83,7 +84,9 @@ async def _build_context(session: AsyncSession) -> str:
     # Plans
     plans = (
         (await session.execute(
-            select(Plan).where(Plan.is_active.is_(True)).order_by(Plan.sort_order, Plan.id)
+            select(Plan).where(
+                Plan.is_active.is_(True), Plan.slug.not_in(RETIRED_PLAN_SLUGS)
+            ).order_by(Plan.sort_order, Plan.id)
         )).scalars().all()
     )
     if plans:
