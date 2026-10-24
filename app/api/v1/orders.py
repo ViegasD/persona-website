@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 from datetime import UTC, datetime
 
 from fastapi import APIRouter, Cookie, Depends, Header, HTTPException, Response, status
@@ -118,11 +119,8 @@ def _item_to_out(item: OrderItem, *, delivered: bool = True) -> OrderItemOut:
     if delivered and item.status == OrderItemStatus.READY and item.video_s3_key:
         token = sign_media_token(item.id)
         video_url = f"{api_base}/api/v1/media/{token}"
-    if item.thumbnail_s3_key:
-        try:
-            thumb_url = storage.presigned_get_url(item.thumbnail_s3_key, expires_in=24 * 3600)
-        except Exception:
-            thumb_url = None
+    if video_url and item.thumbnail_s3_key:
+        thumb_url = video_url + "?thumbnail=true"
     return OrderItemOut(
         id=item.id,
         sequence=item.sequence,
@@ -567,23 +565,29 @@ async def checkout(
         )
 
     # Reuse the most recent open Pix payment if present.
-    existing = None if card is not None else (
+    latest_payment = (
         await session.execute(
             select(Payment)
-            .where(Payment.order_id == order.id, Payment.status == PaymentStatus.PENDING)
+            .where(Payment.order_id == order.id)
             .order_by(Payment.id.desc())
             .limit(1)
         )
     ).scalar_one_or_none()
+    if (latest_payment is not None and not latest_payment.qr_code_payload
+            and latest_payment.status == PaymentStatus.PENDING and card is None):
+        raise HTTPException(409, detail="Já existe um pagamento em análise para este pedido. Aguarde a confirmação.")
+    existing = latest_payment if card is None and latest_payment is not None and latest_payment.status == PaymentStatus.PENDING else None
     if existing is not None:
         if (existing.qr_code_payload and existing.amount_cents == order.total_cents
                 and (existing.expires_at is None or existing.expires_at > datetime.now(UTC))):
             # Valid prior attempt — return it directly.
+            qr_png = await asyncio.to_thread(mercadopago_client.render_qr_png, existing.qr_code_payload)
             return OrderCheckoutOut(
                 order_id=order.id,
                 payment_id=existing.id,
+                payment_method="pix",
                 qr_code_payload=existing.qr_code_payload,
-                qr_code_base64=None,
+                qr_code_base64=base64.b64encode(qr_png).decode("ascii"),
                 qr_code_url="",
                 ticket_url=existing.ticket_url,
                 expires_at=existing.expires_at,
@@ -600,6 +604,11 @@ async def checkout(
     if card is not None:
         if not card.card_token or not card.payment_method_id:
             raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, detail="card data required")
+        if (latest_payment is not None and not latest_payment.qr_code_payload
+                and latest_payment.status == PaymentStatus.PENDING):
+            return OrderCheckoutOut(order_id=order.id, payment_id=latest_payment.id,
+                payment_method="credit_card", amount_cents=latest_payment.amount_cents,
+                card_status="pending", ticket_url=latest_payment.ticket_url, expires_at=None)
         card_result = await mercadopago_client.create_card_payment(
             order_id=order.id,
             amount_cents=order.total_cents,
@@ -611,6 +620,7 @@ async def checkout(
             payer_email=order.guest_email,
             payer_doc_type=card.payer_doc_type,
             payer_doc_number=card.payer_doc_number,
+            attempt_id=latest_payment.id if latest_payment else 0,
         )
         payment_type = "debit_card" if card.payment_method_id.startswith("deb") else "credit_card"
         payment = Payment(
@@ -661,6 +671,7 @@ async def checkout(
         description=f"Persona — pedido #{order.id}",
         notification_url=notification_url,
         payer_email=order.guest_email,
+        attempt_id=latest_payment.id if latest_payment else 0,
     )
 
     payment = Payment(
@@ -707,4 +718,5 @@ async def download_item(
     if (order.status not in {OrderStatus.READY, OrderStatus.DELIVERED} or item is None
             or item.status != OrderItemStatus.READY or not item.video_s3_key):
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="video not ready")
-    return {"url": storage.presigned_get_url(item.video_s3_key, expires_in=3600)}
+    token = sign_media_token(item.id)
+    return {"url": f"{get_settings().api_base_url.rstrip('/')}/api/v1/media/{token}"}

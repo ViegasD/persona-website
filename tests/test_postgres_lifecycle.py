@@ -174,8 +174,9 @@ async def test_website_delivery_download_without_whatsapp_and_while_paused(datab
         assert len(records) == 1 and records[0].channel == DeliveryChannel.ACCOUNT
         assert order.status == OrderStatus.DELIVERED
         monkeypatch.setattr(get_settings(), "worker_enabled", False)
-        assert await orders.download_item(order.id, item.id, user_id, [], session) == {"url": "https://test.invalid/video.mp4"}
-        assert await orders.download_item(order.id, item.id, None, [order.id], session) == {"url": "https://test.invalid/video.mp4"}
+        owner_url = (await orders.download_item(order.id, item.id, user_id, [], session))["url"]
+        guest_url = (await orders.download_item(order.id, item.id, None, [order.id], session))["url"]
+        assert '/api/v1/media/' in owner_url and '/api/v1/media/' in guest_url
         with pytest.raises(HTTPException) as denied:
             await orders.download_item(order.id, item.id, None, [], session)
         assert denied.value.status_code == 403

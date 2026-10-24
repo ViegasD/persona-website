@@ -12,6 +12,7 @@ from typing import Any
 
 import mercadopago
 import qrcode
+from mercadopago.config.request_options import RequestOptions
 from mercadopago.config import RequestOptions
 from qrcode.constants import ERROR_CORRECT_H
 
@@ -57,6 +58,7 @@ async def create_pix_payment(
     notification_url: str,
     payer_email: str | None = None,
     expires_in_minutes: int = 30,
+    attempt_id: int = 0,
 ) -> dict[str, Any]:
     """Create a Pix payment and return ``{paymentId, qrCode, ticketUrl, expiresAt}``."""
     expires_at = datetime.now(UTC) + timedelta(minutes=expires_in_minutes)
@@ -67,11 +69,12 @@ async def create_pix_payment(
         "external_reference": make_external_reference(order_id),
         "notification_url": notification_url,
         "payer": {"email": payer_email or "cliente@persona.com.br"},
-        "date_of_expiration": expires_at.strftime("%Y-%m-%dT%H:%M:%S.000-03:00"),
+        "date_of_expiration": expires_at.isoformat(timespec="milliseconds"),
     }
 
     def _create() -> dict[str, Any]:
-        return _sdk().payment().create(body)
+        options = RequestOptions(custom_headers={"x-idempotency-key": f"web-pix-{order_id}-{amount_cents}-{attempt_id}"})
+        return _sdk().payment().create(body, options)
 
     response = await asyncio.to_thread(_create)
     http_status = response.get("status")
@@ -102,6 +105,7 @@ async def create_card_payment(
     payer_email: str | None = None,
     payer_doc_type: str | None = None,  # "CPF" or "CNPJ"
     payer_doc_number: str | None = None,
+    attempt_id: int = 0,
 ) -> dict[str, Any]:
     """Create a credit/debit card payment and return ``{payment_id, status, status_detail, ticket_url}``."""
     body: dict[str, Any] = {
@@ -118,7 +122,8 @@ async def create_card_payment(
         body["payer"]["identification"] = {"type": payer_doc_type, "number": payer_doc_number}
 
     def _create() -> dict[str, Any]:
-        return _sdk().payment().create(body)
+        options = RequestOptions(custom_headers={"x-idempotency-key": f"web-card-{order_id}-{amount_cents}-{attempt_id}"})
+        return _sdk().payment().create(body, options)
 
     response = await asyncio.to_thread(_create)
     http_status = response.get("status")

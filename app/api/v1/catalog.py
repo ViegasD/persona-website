@@ -2,12 +2,19 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from urllib.parse import quote
+
+from fastapi import APIRouter, Depends, HTTPException, Path, Query, Response
+from starlette.concurrency import run_in_threadpool
+from botocore.exceptions import ClientError
+from PIL import UnidentifiedImageError
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import Plan
 from app.db.session import get_session
+from app.core.settings import get_settings
+from app.services import storage
 from app.schemas.v1 import CharacterOut as BaseCharacterOut
 from app.schemas.v1 import OccasionOut, PlanOut
 from app.services.plan_availability import RETIRED_PLAN_SLUGS
@@ -62,16 +69,12 @@ async def list_characters(
     except Exception as exc:
         raise HTTPException(status_code=503, detail="Character catalog unavailable") from exc
 
-    from app.services.storage import presigned_get_url
-
     out: list[CharacterOut] = []
     for r in rows:
         thumb_url = None
-        if r.get("thumbnail_key"):
-            try:
-                thumb_url = presigned_get_url(r["thumbnail_key"], expires_in=3600)
-            except Exception:  # noqa: BLE001
-                thumb_url = None
+        if r.get("thumbnail_key") and r.get("slug"):
+            thumb_url = (get_settings().api_base_url.rstrip("/") + "/api/v1/catalog/characters/"
+                         + quote(r["slug"], safe="") + "/thumbnail")
         out.append(
             CharacterOut(
                 id=r["id"] if isinstance(r["id"], int) else str(r["id"]),
@@ -85,6 +88,35 @@ async def list_characters(
             )
         )
     return out
+
+
+@router.get("/characters/{slug}/thumbnail")
+async def character_thumbnail(
+    slug: str = Path(min_length=1, max_length=128, pattern=r"^[a-z0-9][a-z0-9-]*$"),
+    session: AsyncSession = Depends(get_session),
+) -> Response:
+    """Expose only active character artwork, never arbitrary storage objects."""
+    try:
+        key = (await session.execute(text(
+            "SELECT thumbnail_s3_key FROM web.character_v WHERE slug = :slug AND is_active = true LIMIT 1"
+        ), {"slug": slug})).scalar_one_or_none()
+    except Exception as exc:
+        raise HTTPException(503, detail="Character catalog unavailable") from exc
+    if not key:
+        raise HTTPException(404, detail="Character thumbnail unavailable")
+    try:
+        image = await run_in_threadpool(storage.thumbnail_bytes, key)
+    except ClientError as exc:
+        code = str(exc.response.get("Error", {}).get("Code", ""))
+        raise HTTPException(404 if code in {"NoSuchKey", "404", "NotFound"} else 503,
+                            detail="Character thumbnail unavailable") from exc
+    except (UnidentifiedImageError, OSError, ValueError) as exc:
+        raise HTTPException(404, detail="Character thumbnail unavailable") from exc
+    except Exception as exc:
+        raise HTTPException(503, detail="Character thumbnail unavailable") from exc
+    return Response(image, media_type="image/webp", headers={
+        "Cache-Control": "public, max-age=3600", "X-Content-Type-Options": "nosniff",
+    })
 
 
 @router.get("/occasions", response_model=list[OccasionOut])

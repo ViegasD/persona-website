@@ -78,6 +78,21 @@ def get_image_as_data_url(key: str) -> str:
     return f"data:{mime};base64,{b64}"
 
 
+def thumbnail_bytes(key: str) -> bytes:
+    """Create a bounded public-catalog image without exposing storage URLs."""
+    import io
+    from PIL import Image, ImageOps
+
+    with Image.open(io.BytesIO(download_bytes(key))) as source:
+        image = ImageOps.exif_transpose(source)
+        image.thumbnail((320, 320))
+        if image.mode not in ("RGB", "RGBA"):
+            image = image.convert("RGBA" if "transparency" in image.info else "RGB")
+        output = io.BytesIO()
+        image.save(output, format="WEBP", quality=82)
+    return output.getvalue()
+
+
 def download_bytes(key: str) -> bytes:
     obj = _client().get_object(Bucket=_settings.s3_bucket, Key=key)
     return obj["Body"].read()

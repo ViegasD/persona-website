@@ -75,3 +75,34 @@ async def test_card_selection_does_not_reuse_pix(monkeypatch):
     )
     assert result.payment_method == "credit_card"
     assert result.payment_id == 30
+
+
+@pytest.mark.asyncio
+async def test_pix_retry_keeps_payment_and_renders_scannable_qr(monkeypatch):
+    import base64
+    order = SimpleNamespace(id=10, status=OrderStatus.AWAITING_PAYMENT, created_at=datetime.now(UTC),
+        plan=SimpleNamespace(video_count=1, slug="teste", is_active=True), items=[SimpleNamespace(id=20)], total_cents=2990)
+    payment = SimpleNamespace(id=99, qr_code_payload="test-pix-payload", ticket_url=None, expires_at=None, amount_cents=2990, status=PaymentStatus.PENDING)
+    session = MagicMock(execute=AsyncMock(return_value=SimpleNamespace(scalar_one_or_none=lambda: payment)))
+    monkeypatch.setattr(orders, '_load_order', AsyncMock(return_value=order))
+    create = AsyncMock()
+    monkeypatch.setattr(orders.mercadopago_client, 'create_pix_payment', create)
+    result = await orders.checkout(10, None, None, [10], None, session)
+    assert result.payment_id == 99 and result.amount_cents == 2990
+    assert base64.b64decode(result.qr_code_base64).startswith(b'\x89PNG\r\n\x1a\n')
+    create.assert_not_awaited()
+    session.add.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_pending_card_is_not_charged_again(monkeypatch):
+    order = SimpleNamespace(id=10, status=OrderStatus.AWAITING_PAYMENT, created_at=datetime.now(UTC),
+        plan=SimpleNamespace(video_count=1, slug="teste", is_active=True), items=[SimpleNamespace(id=20)], total_cents=2990)
+    pending = SimpleNamespace(id=99, qr_code_payload=None, ticket_url=None, amount_cents=2990, status=PaymentStatus.PENDING)
+    session = MagicMock(execute=AsyncMock(return_value=SimpleNamespace(scalar_one_or_none=lambda: pending)))
+    monkeypatch.setattr(orders,'_load_order',AsyncMock(return_value=order))
+    create=AsyncMock();monkeypatch.setattr(orders.mercadopago_client,'create_card_payment',create)
+    result=await orders.checkout(10,CardCheckoutIn(card_token='retry-token',payment_method_id='visa'),None,[10],None,session)
+    assert result.card_status=='pending' and result.payment_id==99
+    create.assert_not_awaited()
+    session.add.assert_not_called()

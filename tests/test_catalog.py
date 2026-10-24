@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 from app.api.v1 import catalog
 from app.db.session import get_session
 from app.services import storage
+from app.core.settings import get_settings
 
 
 @pytest.mark.asyncio
@@ -19,7 +20,7 @@ async def test_character_view_preserves_uuid_slug_tags_and_thumbnail(monkeypatch
                tags=["Bluey", "aniversario"], gender="female", age_range="child")
     session = SimpleNamespace(execute=AsyncMock(return_value=SimpleNamespace(
         mappings=lambda: SimpleNamespace(all=lambda: [row]))))
-    monkeypatch.setattr(storage, "presigned_get_url", lambda key, expires_in: "https://images.test/" + key)
+    monkeypatch.setattr(get_settings(), "api_base_url", "https://api.test")
 
     result = await catalog.list_characters(occasion="aniversario", gender="female",
                                            limit=200, offset=200, session=session)
@@ -27,7 +28,7 @@ async def test_character_view_preserves_uuid_slug_tags_and_thumbnail(monkeypatch
     assert result[0].id == row["id"]
     assert result[0].slug == "bluey"
     assert result[0].tags == row["tags"]
-    assert result[0].thumbnail_url == "https://images.test/characters/bluey/photo.webp"
+    assert result[0].thumbnail_url == "https://api.test/api/v1/catalog/characters/bluey/thumbnail"
     statement, params = session.execute.call_args.args
     assert "thumbnail_s3_key AS thumbnail_key" in str(statement)
     assert "age_range" in str(statement)
@@ -60,7 +61,7 @@ def test_character_http_response_supports_uuid_and_pagination_bounds(monkeypatch
                thumbnail_key="characters/bluey/photo.webp", tags=["Familia"])
     session = SimpleNamespace(execute=AsyncMock(return_value=SimpleNamespace(
         mappings=lambda: SimpleNamespace(all=lambda: [row]))))
-    monkeypatch.setattr(storage, "presigned_get_url", lambda key, expires_in: "https://images.test/" + key)
+    monkeypatch.setattr(get_settings(), "api_base_url", "https://api.test")
     app = FastAPI()
     app.include_router(catalog.router)
     app.dependency_overrides[get_session] = lambda: session
@@ -68,7 +69,7 @@ def test_character_http_response_supports_uuid_and_pagination_bounds(monkeypatch
         response = client.get("/catalog/characters?limit=200&offset=200")
         assert response.status_code == 200
         assert response.json()[0]["id"] == row["id"]
-        assert response.json()[0]["thumbnail_url"] == "https://images.test/characters/bluey/photo.webp"
+        assert response.json()[0]["thumbnail_url"] == "https://api.test/api/v1/catalog/characters/bluey/thumbnail"
         assert response.json()[0]["tags"] == ["Familia"]
         assert client.get("/catalog/characters?limit=201").status_code == 422
         assert client.get("/catalog/characters?offset=-1").status_code == 422
