@@ -2,12 +2,12 @@
 
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import and_, false, or_, select
+from sqlalchemy import String, and_, cast, false, or_, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.settings import get_settings
-from app.db.models import Order, OrderItem, OrderItemStatus, OrderStatus, OutboxJob
+from app.db.models import AccountToken, Order, OrderItem, OrderItemStatus, OrderStatus, OutboxJob
 from app.db.session import session_scope
 from app.services.account_mail import send_account_email
 from app.services.processing_policy import processing_allowed, processing_enabled
@@ -62,6 +62,15 @@ async def deliver_outbox_job(session: AsyncSession, job: OutboxJob) -> None:
     job.last_error = None
 
 
+def active_account_mail(now: datetime):
+    # Leave obsolete mail untouched instead of sending expired or replaced links.
+    return and_(OutboxJob.kind == "account_email", select(AccountToken.id).where(
+        OutboxJob.dedup_key == "account_email:" + cast(AccountToken.id, String),
+        AccountToken.user_id == OutboxJob.user_id,
+        AccountToken.used_at.is_(None), AccountToken.expires_at > now,
+    ).exists())
+
+
 async def dispatch_outbox(ctx: dict | None = None) -> None:
     eligible = false()
     if processing_enabled():
@@ -72,7 +81,7 @@ async def dispatch_outbox(ctx: dict | None = None) -> None:
         async with session_scope() as session:
             job = (await session.execute(select(OutboxJob).where(
                 OutboxJob.delivered_at.is_(None), OutboxJob.available_at <= datetime.now(UTC),
-                or_(OutboxJob.kind == "account_email", eligible),
+                or_(active_account_mail(datetime.now(UTC)), eligible),
             ).order_by(OutboxJob.id).limit(1).with_for_update(skip_locked=True))).scalar_one_or_none()
             if job is None:
                 break

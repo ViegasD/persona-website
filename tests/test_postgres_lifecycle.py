@@ -316,7 +316,14 @@ async def test_outbox_failure_persists_retry_and_success_scrubs_email(database, 
         await session.execute(update(OutboxJob).where(OutboxJob.delivered_at.is_(None)).values(
             available_at=datetime.now(UTC) + timedelta(days=1),
         ))
-        job = OutboxJob(dedup_key=uuid.uuid4().hex, kind="account_email",
+        user = User(email=f"mail-{uuid.uuid4().hex}@example.com")
+        session.add(user)
+        await session.flush()
+        token = AccountToken(user_id=user.id, token_hash=uuid.uuid4().hex, purpose="verify",
+                             expires_at=datetime.now(UTC) + timedelta(hours=1))
+        session.add(token)
+        await session.flush()
+        job = OutboxJob(dedup_key=f"account_email:{token.id}", kind="account_email", user_id=user.id,
                         payload={"to": "test@example.com", "subject": "Test", "body": "secret-link"})
         session.add(job)
         await session.commit()

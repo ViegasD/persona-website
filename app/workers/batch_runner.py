@@ -724,6 +724,7 @@ async def _generate_and_store_video(
 
 
 class WorkerSettings:
+    queue_name = get_settings().video_queue_name
     functions = [run_batch, collector_check, process_item_phase1, generate_video_for_approved_item, dispatch_outbox, recover_interrupted_jobs]
     redis_settings = redis_settings()
     cron_jobs = [cron(dispatch_outbox, second={0, 10, 20, 30, 40, 50}, run_at_startup=True),
@@ -742,6 +743,8 @@ class WorkerSettings:
 class AccountWorkerSettings(WorkerSettings):
     """Keep account mail running without consuming the paused video queue."""
 
+    # ARQ reads the class __dict__, not inherited connection settings.
+    redis_settings = redis_settings()
     queue_name = "persona:account:queue"
     functions = [dispatch_outbox]
     cron_jobs = [cron(dispatch_outbox, second={0, 10, 20, 30, 40, 50}, run_at_startup=True)]

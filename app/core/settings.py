@@ -30,6 +30,7 @@ class Settings(BaseSettings):
 
     # --- Redis (separate DB index from Node BullMQ) ---
     redis_url: str = Field("redis://redis:6379/1", alias="STOREFRONT_REDIS_URL")
+    video_queue_name: str = Field("arq:queue", alias="STOREFRONT_VIDEO_QUEUE", min_length=1)
 
     # --- S3 / MinIO (shared; storefront uses prefix "web/") ---
     s3_endpoint: str = Field(..., alias="S3_ENDPOINT")
@@ -76,6 +77,8 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def validate_processing_window(self) -> Settings:
+        if self.video_queue_name == "persona:account:queue":
+            raise ValueError("Video and account queues must be separate")
         if self.processing_start_at is not None and self.processing_start_at.utcoffset() is None:
             raise ValueError("STOREFRONT_PROCESSING_START_AT must include a timezone")
         if self.worker_enabled and self.processing_start_at is None:
