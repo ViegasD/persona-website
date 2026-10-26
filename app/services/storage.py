@@ -112,3 +112,15 @@ def thumbnail_bytes(key: str) -> bytes:
 def download_bytes(key: str) -> bytes:
     obj = _client().get_object(Bucket=_settings.s3_bucket, Key=key)
     return obj["Body"].read()
+
+
+def download_byte_range(key: str, byte_range: str) -> tuple[bytes, str]:
+    obj = _client().get_object(Bucket=_settings.s3_bucket, Key=key, Range=byte_range)
+    try:
+        return obj["Body"].read(), obj["ContentRange"]
+    finally:
+        obj["Body"].close()
+
+
+def object_size(key: str) -> int:
+    return int(_client().head_object(Bucket=_settings.s3_bucket, Key=key)["ContentLength"])

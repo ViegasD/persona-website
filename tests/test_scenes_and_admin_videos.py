@@ -1,5 +1,5 @@
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 import io
 import json
 import pytest
@@ -70,3 +70,28 @@ def test_admin_order_videos_are_authenticated_signed_and_do_not_expose_storage()
     data=response.json()['items'][0]
     assert '/api/v1/media/' in data['video_url'] and '?scene=true' in data['scene_url']
     assert 'private/' not in response.text
+
+
+@pytest.mark.asyncio
+async def test_private_video_byte_ranges_and_invalid_ranges(monkeypatch):
+    from contextlib import asynccontextmanager
+    from fastapi import HTTPException
+    from app.api.v1 import media
+    from app.core.security import sign_media_preview_token
+    item=SimpleNamespace(id=1,character_ids=['bela'],video_s3_key='private/video.mp4',composite_image_s3_key=None)
+    @asynccontextmanager
+    async def session_scope():
+        yield SimpleNamespace(execute=AsyncMock(return_value=SimpleNamespace(scalar_one_or_none=lambda:item)))
+    monkeypatch.setattr(media,'session_scope',session_scope)
+    read=MagicMock(return_value=(b'0123','bytes 0-3/100'))
+    monkeypatch.setattr(media.storage,'download_byte_range',read)
+    token=sign_media_preview_token(1)
+    response=await media.proxy_media(token,range_header='bytes=0-3')
+    assert response.status_code==206 and response.body==b'0123'
+    assert response.headers['content-range']=='bytes 0-3/100'
+    assert response.headers['accept-ranges']=='bytes'
+    for invalid in ['bytes=-','bytes=0-2,5-9','garbage']:
+        with pytest.raises(HTTPException) as error:
+            await media.proxy_media(token,range_header=invalid)
+        assert error.value.status_code==416
+    assert read.call_count==1
