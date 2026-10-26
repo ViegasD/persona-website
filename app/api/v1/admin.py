@@ -139,6 +139,27 @@ async def list_orders(
     return [_to_out(o) for o in orders]
 
 
+@router.get("/orders/{order_id}/videos")
+async def order_videos(order_id: int, session: AsyncSession = Depends(get_session)) -> dict:
+    order = (await session.execute(select(Order).where(Order.id == order_id)
+                                   .options(selectinload(Order.items)))).scalar_one_or_none()
+    if order is None:
+        raise HTTPException(404, detail="order not found")
+    base = get_settings().api_base_url.rstrip("/")
+    items = []
+    for item in order.items:
+        url = f"{base}/api/v1/media/{sign_media_preview_token(item.id)}"
+        items.append({
+            "item_id": item.id, "sequence": item.sequence, "status": item.status.value,
+            "character_ids": item.character_ids,
+            "video_url": url if item.video_s3_key else None,
+            "scene_url": url + "?scene=true" if item.composite_image_s3_key else None,
+            "thumbnail_url": url + "?thumbnail=true" if item.thumbnail_s3_key else None,
+        })
+    return {"order_id": order.id, "status": order.status.value,
+            "recipient_name": order.recipient_name, "items": items}
+
+
 @router.post("/orders/{order_id}/reprocess", status_code=status.HTTP_200_OK)
 async def reprocess_order(order_id: int, session: AsyncSession = Depends(get_session)) -> dict:
     """Re-enqueue stuck items OR advance order status if all items are already READY."""

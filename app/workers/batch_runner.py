@@ -42,7 +42,7 @@ from app.db.models import (
     OrderStatus,
 )
 from app.db.session import session_scope
-from app.services import delivery, kie_client, script_writer, storage, xai_client
+from app.services import delivery, kie_client, script_writer, storage, xai_client, scene_builder
 from app.services.outbox import dispatch_outbox, record_delivery_job, record_video_jobs
 from app.services.processing_policy import processing_allowed, processing_enabled
 from app.services.prompt_builder import (
@@ -93,7 +93,7 @@ def composite_cache_key(
             "characters": character_ids,
             "references": reference_hashes or [],
             "model": model or get_settings().kie_nano_banana_model,
-            "prompt_version": "identity-v2",
+            "prompt_version": scene_builder.SCENE_VERSION,
             "recipient": (recipient_name or "").strip().lower(),
             "occasion": (occasion_slug or "").strip().lower(),
         },
@@ -175,12 +175,8 @@ async def _resolve_composite_url(
 ) -> tuple[str, str | None]:
     """Return ``(input_image_url, composite_s3_key_or_None)``.
 
-    Single character → reuse its catalog reference image directly.
-    Multi character → call kie.ai nano-banana-pro to merge them, with cache.
+    All videos start from a finished, reference-preserving background scene.
     """
-    if len(chars) == 1:
-        return chars[0]["reference_url"], None
-
     sha = composite_cache_key(item.character_ids, recipient_name, occasion_slug,
                               reference_hashes=[c["reference_sha256"] for c in chars])
     async with session_scope() as session:
@@ -190,19 +186,13 @@ async def _resolve_composite_url(
             )
         ).scalar_one_or_none()
     if cached:
-        return await asyncio.to_thread(storage.get_image_as_data_url, cached.s3_key, portrait=True), cached.s3_key
+        async with session_scope() as session:
+            current = await session.get(OrderItem, item.id)
+            current.composite_image_s3_key = cached.s3_key
+            await session.commit()
+        return await asyncio.to_thread(storage.get_image_as_data_url, cached.s3_key), cached.s3_key
 
-    # Build a tight, kid-safe composite prompt — Nano Banana is good at this.
-    descriptors = ", ".join(
-        f"({c['name']}: {c['descriptor']})" if c["descriptor"] else c["name"] for c in chars
-    )
-    composite_prompt = (
-        f"Combine these {len(chars)} characters into a single image, standing side by side "
-        "on a plain neutral background. Preserve each reference's art style and viewing angle. "
-        f"Characters from left to right: {descriptors}. "
-        "Keep each character's appearance, outfit, colors and proportions exactly as in their reference image. "
-        "Full body or three-quarter framing. No text, no captions, no logos. Vertical 9:16 composition."
-    )
+    composite_prompt = scene_builder.scene_prompt([c["name"] for c in chars], occasion_slug)
     # KIE image_input requires public HTTP URLs, not data URIs.
     kie_image_urls = [storage.presigned_get_url(c["s3_key"], expires_in=3600) for c in chars]
     task_id = await kie_client.create_composite_task(
@@ -211,20 +201,46 @@ async def _resolve_composite_url(
         image_size="9:16",
         output_format="PNG",
     )
+    async with session_scope() as session:
+        current = await session.get(OrderItem, item.id)
+        current.comfy_workflow_a_prompt_id = task_id
+        await session.commit()
     await _log_api_cost("kie", "composite_image", item.id)
-    payload = await kie_client.wait_for_task(task_id)
-    composite_url = kie_client.extract_first_image_url(payload)
-
-    # Persist a copy in our S3 so we don't depend on kie's CDN expiry.
-    raw = await xai_client.download_image(composite_url)
+    try:
+        payload = await kie_client.wait_for_task(task_id)
+        raw = await xai_client.download_image(kie_client.extract_first_image_url(payload))
+    except kie_client.KieError as exc:
+        if len(chars) != 1 or "content policy" not in str(exc).lower():
+            raise
+        # Compose the existing catalog artwork unchanged over scenery generated on its own.
+        task_id = await kie_client.create_composite_task(prompt=scene_builder.background_prompt(occasion_slug), image_urls=[])
+        async with session_scope() as session:
+            current = await session.get(OrderItem, item.id)
+            current.comfy_workflow_a_prompt_id = task_id
+            await session.commit()
+        await _log_api_cost("kie", "composite_image", item.id)
+        payload = await kie_client.wait_for_task(task_id)
+        background = await xai_client.download_image(kie_client.extract_first_image_url(payload))
+        original = await asyncio.to_thread(storage.download_bytes, chars[0]["s3_key"])
+        raw = await asyncio.to_thread(scene_builder.compose_original_on_background, original, background)
+    scene_builder.validate_scene_dimensions(raw)
     s3_key = storage.storefront_key("composites", f"{sha}.png")
     storage.upload_bytes(s3_key, raw, content_type="image/png")
+    candidate = await asyncio.to_thread(storage.get_image_as_data_url, s3_key)
+    async with session_scope() as session:
+        current = await session.get(OrderItem, item.id)
+        current.composite_image_s3_key = s3_key
+        current.comfy_workflow_a_prompt_id = task_id
+        await session.commit()
+    original_refs = [await asyncio.to_thread(storage.get_image_as_data_url, c["s3_key"]) for c in chars]
+    verdict = await scene_builder.review_scene(original_refs, candidate)
     async with session_scope() as session:
         session.add(
-            CompositeFrameCache(sha=sha, s3_key=s3_key, character_ids=item.character_ids)
+            CompositeFrameCache(sha=sha, s3_key=s3_key, character_ids=item.character_ids,
+                                payload={"review": verdict, "version": scene_builder.SCENE_VERSION})
         )
         await session.commit()
-    return await asyncio.to_thread(storage.get_image_as_data_url, s3_key, portrait=True), s3_key
+    return await asyncio.to_thread(storage.get_image_as_data_url, s3_key), s3_key
 
 
 # ─────────────────────────── per-item task (legacy batch) ─────────────────
@@ -568,7 +584,7 @@ async def generate_video_for_approved_item(ctx: dict[str, Any], item_id: int) ->
             # Multi-char: composite exists, need to generate video now
             chars = await _load_characters(char_ids)
             input_image_url = (
-                await asyncio.to_thread(storage.get_image_as_data_url, composite_key, portrait=True)
+                await asyncio.to_thread(storage.get_image_as_data_url, composite_key)
                 if composite_key
                 else (await _resolve_composite_url(item, chars, recipient_name=recipient_name, occasion_slug=occasion_slug))[0]
             )

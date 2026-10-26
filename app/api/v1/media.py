@@ -23,7 +23,7 @@ router = APIRouter(prefix="/media", tags=["media"])
 
 
 @router.get("/{token}")
-async def proxy_media(token: str, thumbnail: bool = False) -> Response:
+async def proxy_media(token: str, thumbnail: bool = False, scene: bool = False) -> Response:
     """Stream an order item's video (or composite image) from S3."""
     item_id = verify_media_token(token)
     preview = False
@@ -34,9 +34,7 @@ async def proxy_media(token: str, thumbnail: bool = False) -> Response:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="invalid or expired token")
 
     async with session_scope() as session:
-        stmt = select(OrderItem).join(Order).where(
-            OrderItem.id == item_id, Order.status != OrderStatus.REFUNDED,
-        )
+        stmt = select(OrderItem).join(Order).where(OrderItem.id == item_id)
         if not preview:
             stmt = stmt.where(Order.status.in_([OrderStatus.READY, OrderStatus.DELIVERED]),
                               OrderItem.status == OrderItemStatus.READY)
@@ -46,6 +44,14 @@ async def proxy_media(token: str, thumbnail: bool = False) -> Response:
 
     if item is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND)
+
+    if scene:
+        if not preview:
+            raise HTTPException(403, detail="admin preview required")
+        if not item.composite_image_s3_key:
+            raise HTTPException(404, detail="scene not ready")
+        data = await run_in_threadpool(storage.download_bytes, item.composite_image_s3_key)
+        return Response(data, media_type="image/png", headers={"Cache-Control": "private, no-store"})
 
     if thumbnail:
         if not item.thumbnail_s3_key:
@@ -67,6 +73,6 @@ async def proxy_media(token: str, thumbnail: bool = False) -> Response:
         media_type=content_type,
         headers={
             "Cache-Control": "private, max-age=3600",
-            "Content-Disposition": f'attachment; filename="video_{item_id}.{ext}"',
+            "Content-Disposition": f'inline; filename="video_{item_id}.{ext}"',
         },
     )

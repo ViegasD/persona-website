@@ -57,6 +57,7 @@ async def prepare(root):
             state["items"][str(item_id)] = {
                 "order_id": order_id, "sequence": item.sequence, "characters": item.character_ids,
                 "old_key": item.video_s3_key, "old_thumbnail": item.thumbnail_s3_key,
+                "old_scene": item.composite_image_s3_key, "old_scene_request_id": item.comfy_workflow_a_prompt_id,
                 "old_prompt": item.resolved_script, "old_request_id": item.comfy_workflow_b_prompt_id,
                 "custom_message": item.custom_message, "recipient_name": order.recipient_name,
                 "recipient_age": order.recipient_age, "occasion": order.occasion_slug,
@@ -76,19 +77,23 @@ async def generate(root, state):
             raise RuntimeError(f"Item {item_id}: ambiguous submission; inspect provider before retrying")
         if not entry.get("request_id"):
             chars = await _load_characters(entry["characters"])
-            image_url = chars[0]["reference_url"]
+            image_url = (storage.get_image_as_data_url(entry["scene_key"])
+                         if entry.get("scene_key") else chars[0]["reference_url"])
             child, age, occasion, message = _extract_child_meta(entry["custom_message"])
-            script = await script_writer.generate_structured_script(
-                characters=[script_writer.CharacterSpec(c["id"], c["name"], c["descriptor"]) for c in chars],
-                recipient_name=child or entry["recipient_name"] or "amiguinho",
-                recipient_age=age or entry["recipient_age"], occasion_slug=occasion or entry["occasion"],
-                user_message=message, duration_seconds=state["duration"],
-            )
-            entry["prompt"] = build_video_prompt(VideoPromptInputs(
-                "Animate only the character in the supplied image. Preserve the complete original appearance, pose, viewing angle and background.",
-                [CharacterLine("character in the supplied image", script.character_lines[0])],
-                script.group_line, state["duration"],
-            ))
+            if not entry.get("reuse_prompt"):
+                script = await script_writer.generate_structured_script(
+                    characters=[script_writer.CharacterSpec(c["id"], c["name"], c["descriptor"]) for c in chars],
+                    recipient_name=child or entry["recipient_name"] or "amiguinho",
+                    recipient_age=age or entry["recipient_age"], occasion_slug=occasion or entry["occasion"],
+                    user_message=message, duration_seconds=state["duration"],
+                )
+                entry["prompt"] = build_video_prompt(VideoPromptInputs(
+                    "Animate only the character in the supplied image. Preserve the complete original appearance, pose, viewing angle and background.",
+                    [CharacterLine("character in the supplied image", script.character_lines[0])],
+                    script.group_line, state["duration"],
+                ))
+            else:
+                entry["prompt"] = entry["reuse_prompt"]
             entry["reference_sha256"] = hashlib.sha256(image_url.encode()).hexdigest()
             entry["reference_key"] = chars[0]["s3_key"]
             entry["status"] = "submitting"
@@ -155,6 +160,9 @@ async def publish(root, state):
             item.thumbnail_s3_key = entry["new_thumbnail"]
             item.resolved_script = entry["prompt"]
             item.comfy_workflow_b_prompt_id = entry["request_id"]
+            if entry.get("scene_key"):
+                item.composite_image_s3_key = entry["scene_key"]
+                item.comfy_workflow_a_prompt_id = entry.get("background_task_id") or entry["scene_task_id"]
         await session.commit()
     for entry in state["items"].values(): entry["status"] = "published"
     state["published_at"] = datetime.now(UTC).isoformat()
