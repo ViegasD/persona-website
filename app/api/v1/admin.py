@@ -53,6 +53,8 @@ async def storefront_settings(session: AsyncSession = Depends(get_session)) -> d
             "whatsapp_delivery_enabled": settings.whatsapp_delivery_enabled,
             "signup_bonus": 0, "purchase_bonus": 0, "credits_per_video": 1,
             "credit_purchase_enabled": False,
+            "default_video_duration_seconds": settings.xai_video_duration_seconds,
+            "default_video_model": settings.xai_video_model,
         },
     }
 

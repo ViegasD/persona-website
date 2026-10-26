@@ -89,14 +89,20 @@ async def start_image_to_video(
     duration: int = 10,
     aspect_ratio: str = "9:16",
     resolution: str = "720p",
+    model: str | None = None,
 ) -> str:
+    if not image_url.strip():
+        raise ValueError("a reference image is required for image-to-video")
+    if not 1 <= duration <= 15:
+        raise ValueError("video duration must be between 1 and 15 seconds")
     s = get_settings()
     url = f"{s.xai_api_base.rstrip('/')}/videos/generations"
     body: dict[str, Any] = {
-        "model": s.xai_video_model,
+        "model": model or s.xai_video_model,
         "prompt": prompt,
-        "image_url": image_url,
-        "duration": max(1, min(duration, 15)),
+        # REST uses an image object; image_url is the Python SDK argument.
+        "image": {"url": image_url},
+        "duration": duration,
         "aspect_ratio": aspect_ratio,
         "resolution": resolution,
     }
@@ -187,7 +193,7 @@ async def _download_asset(url: str) -> bytes:
     return resp.content
 
 
-def _validate_video(data: bytes) -> None:
+def _validate_video(data: bytes, expected_duration: int | None = None) -> None:
     path: Path | None = None
     try:
         with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as handle:
@@ -195,9 +201,12 @@ def _validate_video(data: bytes) -> None:
             handle.write(data)
         probe = subprocess.run([
             "ffprobe", "-v", "error", "-select_streams", "v:0", "-count_frames",
-            "-show_entries", "stream=width,height,nb_read_frames", "-of", "json", str(path),
+            "-show_entries", "stream=width,height,nb_read_frames:format=duration", "-of", "json", str(path),
         ], capture_output=True, timeout=120, check=True)
         streams = json.loads(probe.stdout).get("streams", [])
+        actual_duration = float(json.loads(probe.stdout).get("format", {}).get("duration", 0))
+        if expected_duration is not None and abs(actual_duration - expected_duration) > 0.5:
+            raise ValueError("unexpected video duration")
         if (not streams or int(streams[0].get("width", 0)) <= 0
                 or int(streams[0].get("height", 0)) <= 0
                 or int(streams[0].get("nb_read_frames", 0)) <= 0 or probe.stderr.strip()):
@@ -209,10 +218,10 @@ def _validate_video(data: bytes) -> None:
             path.unlink(missing_ok=True)
 
 
-async def download_video(url: str) -> bytes:
+async def download_video(url: str, *, expected_duration: int | None = None) -> bytes:
     """Require a decodable video track before the caller uploads or marks READY."""
     data = await _download_asset(url)
-    await asyncio.to_thread(_validate_video, data)
+    await asyncio.to_thread(_validate_video, data, expected_duration)
     return data
 
 

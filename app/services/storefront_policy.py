@@ -1,6 +1,7 @@
 """Persisted checkout controls; deployment safety limits cannot be overridden."""
 
 from datetime import UTC, datetime
+from typing import Literal
 
 from fastapi import HTTPException
 from pydantic import BaseModel, ConfigDict, Field, StrictBool
@@ -18,6 +19,8 @@ class PolicyValues(BaseModel):
     registration_enabled: StrictBool = True
     credit_redemption_enabled: StrictBool = True
     require_account_checkout: StrictBool = False
+    video_duration_seconds: int | None = Field(None, ge=4, le=15, strict=True)
+    video_model: Literal["grok-imagine-video", "grok-imagine-video-1.5"] | None = None
 
 
 async def read_policy(session: AsyncSession) -> PolicyValues:

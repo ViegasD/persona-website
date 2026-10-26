@@ -51,7 +51,7 @@ def presigned_get_url(key: str, expires_in: int = 3600) -> str:
     )
 
 
-def get_image_as_data_url(key: str) -> str:
+def get_image_as_data_url(key: str, *, portrait: bool = False) -> str:
     """Download an image from S3 and return it as a base64 data URL.
 
     Use this instead of presigned_get_url when the URL will be sent to an
@@ -65,6 +65,8 @@ def get_image_as_data_url(key: str) -> str:
     from PIL import Image
 
     data = download_bytes(key)
+    if portrait:
+        data = prepare_portrait_reference(data)
     with Image.open(io.BytesIO(data)) as image:
         image.load()
         mime = {"JPEG": "image/jpeg", "PNG": "image/png"}.get(image.format)
@@ -76,6 +78,20 @@ def get_image_as_data_url(key: str) -> str:
         mime = "image/jpeg"
     b64 = base64.b64encode(data).decode()
     return f"data:{mime};base64,{b64}"
+
+
+def prepare_portrait_reference(data: bytes) -> bytes:
+    """Fit the complete original on a neutral 9:16 canvas, without generative editing."""
+    import io
+    from PIL import Image, ImageOps
+    with Image.open(io.BytesIO(data)) as source:
+        image = ImageOps.exif_transpose(source).convert("RGBA")
+        image.thumbnail((720, 1280), Image.Resampling.LANCZOS)
+        canvas = Image.new("RGB", (720, 1280), "white")
+        canvas.paste(image, ((720 - image.width) // 2, (1280 - image.height) // 2), image)
+        output = io.BytesIO()
+        canvas.save(output, format="PNG")
+        return output.getvalue()
 
 
 def thumbnail_bytes(key: str) -> bytes:

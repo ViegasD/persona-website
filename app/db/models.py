@@ -53,6 +53,8 @@ class StorefrontPolicy(Base):
     registration_enabled: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
     credit_redemption_enabled: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
     require_account_checkout: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    video_duration_seconds: Mapped[int | None] = mapped_column(Integer)
+    video_model: Mapped[str | None] = mapped_column(String(64))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 

@@ -7,7 +7,7 @@ import base64
 from datetime import UTC, datetime
 
 from fastapi import APIRouter, Cookie, Depends, Header, HTTPException, Response, status
-from sqlalchemy import select
+from sqlalchemy import select, and_, or_, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -73,6 +73,11 @@ async def _load_order(
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="order not found")
     if order.user_id is not None and order.user_id == user_id:
         return order
+    if user_id is not None and order.user_id is None and not lock:
+        user = await session.get(User, user_id)
+        if (user is not None and user.email_verified_at is not None and user.email and order.guest_email
+                and user.email.strip().lower() == order.guest_email.strip().lower()):
+            return order
     if order.id in guest_order_ids:
         return order
     # Fallback: verify X-Guest-Token header (avoids third-party cookie blocking)
@@ -203,8 +208,14 @@ async def my_orders(
     user_id: int = Depends(require_user),
     session: AsyncSession = Depends(get_session),
 ) -> list[OrderOut]:
+    # Verified mailbox ownership grants read-only access to guest purchases;
+    # never infer ownership from an unverified email or overwrite another owner.
+    user = await session.get(User, user_id)
+    ownership = Order.user_id == user_id
+    if user is not None and user.email_verified_at is not None and user.email:
+        ownership = or_(ownership, and_(Order.user_id.is_(None), func.lower(func.trim(Order.guest_email)) == user.email.strip().lower()))
     orders = (await session.execute(
-        select(Order).where(Order.user_id == user_id)
+        select(Order).where(ownership)
         .options(selectinload(Order.items), selectinload(Order.plan))
         .order_by(Order.created_at.desc()).limit(100)
     )).scalars().all()

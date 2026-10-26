@@ -64,7 +64,7 @@ def _build_shared_header(scene_description: str) -> list[str]:
     parts.append("")
     parts.append(
         "IMPORTANT: The character must remain in the exact same position and orientation as the "
-        "reference image, always facing directly toward the camera, no side view, no rotation, "
+        "reference image; preserve its existing viewing angle, no rotation, "
         "no change in body position."
     )
     parts.append("")
@@ -96,7 +96,7 @@ def _build_single_character_prompt(inputs: VideoPromptInputs) -> str:
         f"Timing guidance: all speech must finish before the last 2 seconds to avoid being cut off."
     )
     parts.append("")
-    parts.append("Animation: lips, blinking, natural body and facial expression")
+    parts.append("Animation: lip sync, blinking and subtle facial expression only. Keep body, hands, clothing and background still.")
     parts.append(
         "Audio: clear Brazilian Portuguese, natural voice matching the character, accurate lip sync"
     )
@@ -111,9 +111,9 @@ def _build_multi_character_prompt(inputs: VideoPromptInputs) -> str:
 
     parts = _build_shared_header(inputs.scene_description)
     # Override the "character" wording to plural
-    parts[2] = (
+    parts[4] = (
         "IMPORTANT: All characters must remain in the exact same positions and orientation as the "
-        "reference image, always facing directly toward the camera, no side view, no rotation, "
+        "reference image; preserve their existing viewing angles, no rotation, "
         "no change in body position."
     )
 
@@ -140,6 +140,10 @@ def _build_multi_character_prompt(inputs: VideoPromptInputs) -> str:
         parts.append("")
 
     # ── Final group line ──────────────────────────────────────────────
+    if not inputs.group_line_pt.strip():
+        parts.append("All speech must finish before the last 2 seconds. Animate only lips, blinking and subtle facial expressions. Keep bodies, hands and background still.")
+        parts.append("Audio: clear Brazilian Portuguese, natural voices matching the characters, accurate lip sync, no overlap.")
+        return "\n".join(parts).strip()
     parts.append(
         "Final moment: all characters speak together, still in the exact same pose, "
         "synchronized lip movement and natural facial expression."
@@ -152,7 +156,7 @@ def _build_multi_character_prompt(inputs: VideoPromptInputs) -> str:
         "Timing guidance: the final group line must begin before the last 2 seconds to avoid being cut off."
     )
     parts.append("")
-    parts.append("Animation: lips, blinking, natural body and facial expression")
+    parts.append("Animation: lip sync, blinking and subtle facial expression only. Keep bodies, hands, clothing and background still.")
     parts.append(
         "Audio: clear Brazilian Portuguese, natural voices matching the characters, accurate lip sync, no overlap except final line"
     )

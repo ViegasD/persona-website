@@ -51,6 +51,7 @@ from app.services.prompt_builder import (
     build_video_prompt,
 )
 from app.services.worker_recovery import recover_interrupted_jobs
+from app.services.generation_config import read_generation_config
 from app.workers.queue import redis_settings
 
 # ─────────────────────────── helpers ──────────────────────────────────────
@@ -84,11 +85,15 @@ def _extract_child_meta(
 
 
 def composite_cache_key(
-    character_ids: list[str], recipient_name: str | None, occasion_slug: str | None
+    character_ids: list[str], recipient_name: str | None, occasion_slug: str | None,
+    *, reference_hashes: list[str] | None = None, model: str | None = None,
 ) -> str:
     payload = json.dumps(
         {
-            "characters": sorted(character_ids),
+            "characters": character_ids,
+            "references": reference_hashes or [],
+            "model": model or get_settings().kie_nano_banana_model,
+            "prompt_version": "identity-v2",
             "recipient": (recipient_name or "").strip().lower(),
             "occasion": (occasion_slug or "").strip().lower(),
         },
@@ -98,14 +103,15 @@ def composite_cache_key(
 
 
 async def _log_api_cost(
-    provider: str, operation: str, order_item_id: int | None = None
+    provider: str, operation: str, order_item_id: int | None = None,
+    *, duration: int | None = None, resolution: str | None = None,
 ) -> None:
     """Insert an ApiCostLog row using the configured cost estimate for the provider+operation."""
     s = get_settings()
     if provider == "xai" and operation == "video_generation":
-        is_hd = s.xai_video_resolution != "480p"
+        is_hd = (resolution or s.xai_video_resolution) != "480p"
         rate = s.cost_xai_hd_per_sec_micro_usd if is_hd else s.cost_xai_sd_per_sec_micro_usd
-        cost = rate * s.xai_video_duration_seconds
+        cost = rate * (duration or s.xai_video_duration_seconds)
     elif provider == "kie" and operation == "composite_image":
         cost = s.cost_kie_composite_micro_usd
     else:
@@ -146,7 +152,7 @@ async def _load_characters(character_slugs: list[str]) -> list[dict[str, Any]]:
         thumb_key = row[3]
         if not thumb_key:
             raise RuntimeError(f"character '{slug}' has no reference image")
-        url = storage.get_image_as_data_url(thumb_key)
+        url = await asyncio.to_thread(storage.get_image_as_data_url, thumb_key, portrait=True)
         out.append(
             {
                 "id": slug,
@@ -154,6 +160,7 @@ async def _load_characters(character_slugs: list[str]) -> list[dict[str, Any]]:
                 "descriptor": (row[2] or "").strip(),
                 "reference_url": url,
                 "s3_key": thumb_key,
+                "reference_sha256": hashlib.sha256(url.encode()).hexdigest(),
             }
         )
     return out
@@ -174,7 +181,8 @@ async def _resolve_composite_url(
     if len(chars) == 1:
         return chars[0]["reference_url"], None
 
-    sha = composite_cache_key(item.character_ids, recipient_name, occasion_slug)
+    sha = composite_cache_key(item.character_ids, recipient_name, occasion_slug,
+                              reference_hashes=[c["reference_sha256"] for c in chars])
     async with session_scope() as session:
         cached = (
             await session.execute(
@@ -182,7 +190,7 @@ async def _resolve_composite_url(
             )
         ).scalar_one_or_none()
     if cached:
-        return storage.get_image_as_data_url(cached.s3_key), cached.s3_key
+        return await asyncio.to_thread(storage.get_image_as_data_url, cached.s3_key, portrait=True), cached.s3_key
 
     # Build a tight, kid-safe composite prompt — Nano Banana is good at this.
     descriptors = ", ".join(
@@ -190,7 +198,7 @@ async def _resolve_composite_url(
     )
     composite_prompt = (
         f"Combine these {len(chars)} characters into a single image, standing side by side "
-        "facing the camera on a colorful, vibrant kid-friendly stage with warm lighting. "
+        "on a plain neutral background. Preserve each reference's art style and viewing angle. "
         f"Characters from left to right: {descriptors}. "
         "Keep each character's appearance, outfit, colors and proportions exactly as in their reference image. "
         "Full body or three-quarter framing. No text, no captions, no logos. Vertical 9:16 composition."
@@ -216,7 +224,7 @@ async def _resolve_composite_url(
             CompositeFrameCache(sha=sha, s3_key=s3_key, character_ids=item.character_ids)
         )
         await session.commit()
-    return storage.get_image_as_data_url(s3_key), s3_key
+    return await asyncio.to_thread(storage.get_image_as_data_url, s3_key, portrait=True), s3_key
 
 
 # ─────────────────────────── per-item task (legacy batch) ─────────────────
@@ -560,7 +568,7 @@ async def generate_video_for_approved_item(ctx: dict[str, Any], item_id: int) ->
             # Multi-char: composite exists, need to generate video now
             chars = await _load_characters(char_ids)
             input_image_url = (
-                storage.get_image_as_data_url(composite_key)
+                await asyncio.to_thread(storage.get_image_as_data_url, composite_key, portrait=True)
                 if composite_key
                 else (await _resolve_composite_url(item, chars, recipient_name=recipient_name, occasion_slug=occasion_slug))[0]
             )
@@ -642,6 +650,9 @@ async def _generate_and_store_video(
     """Generate video via xAI Grok and store in S3, updating the OrderItem row."""
     settings = get_settings()
 
+    async with session_scope() as session:
+        generation = await read_generation_config(session)
+
     script = await script_writer.generate_structured_script(
         characters=[
             script_writer.CharacterSpec(
@@ -653,6 +664,7 @@ async def _generate_and_store_video(
         recipient_age=recipient_age,
         occasion_slug=occasion_slug,
         user_message=custom_message,
+        duration_seconds=generation.duration,
     )
 
     char_slugs = [c["id"] for c in chars]
@@ -665,31 +677,40 @@ async def _generate_and_store_video(
     )
     scene_description = (
         f"{char_names} — use the reference image exactly, preserve every visual detail of the character(s) — "
-        f"standing on a vibrant, kid-friendly stage with warm lighting"
+        "preserving the original background, composition, pose and viewing angle. Do not introduce a new setting"
     )
     prompt_text = build_video_prompt(
         VideoPromptInputs(
             scene_description=scene_description,
             characters=[
                 CharacterLine(
-                    descriptor=chars[i]["descriptor"] or chars[i]["name"],
+                    descriptor=f"character in reference position {i + 1}",
                     line_pt=script.character_lines[i],
                 )
                 for i in range(len(chars))
             ],
             group_line_pt=script.group_line,
-            duration_seconds=settings.xai_video_duration_seconds,
+            duration_seconds=generation.duration,
         )
     )
 
     request_id = await xai_client.start_image_to_video(
         prompt=prompt_text,
         image_url=input_image_url,
-        duration=settings.xai_video_duration_seconds,
+        duration=generation.duration,
+        model=generation.model,
         aspect_ratio=settings.xai_video_aspect_ratio,
         resolution="720p" if quality == "hd" else "480p",
     )
-    await _log_api_cost("xai", "video_generation", item_id)
+    await _log_api_cost("xai", "video_generation", item_id, duration=generation.duration,
+                        resolution="720p" if quality == "hd" else "480p")
+    logger.info("[item {item}] reference_sha256={sha} request_id={rid}", item=item_id,
+                sha=hashlib.sha256(input_image_url.encode()).hexdigest(), rid=request_id)
+    async with session_scope() as session:
+        item = await session.get(OrderItem, item_id)
+        item.comfy_workflow_b_prompt_id = request_id
+        item.resolved_script = prompt_text
+        await session.commit()
     result = await xai_client.wait_for_video(request_id)
     video_info = result.get("video") or {}
     video_url = video_info.get("url")
@@ -703,8 +724,8 @@ async def _generate_and_store_video(
         order_id = item.order_id
         sequence = item.sequence
 
-    raw = await xai_client.download_video(video_url)
-    video_key = storage.storefront_key("orders", str(order_id), f"video-{sequence}.mp4")
+    raw = await xai_client.download_video(video_url, expected_duration=generation.duration)
+    video_key = storage.storefront_key("orders", str(order_id), f"video-{sequence}-{uuid4().hex}.mp4")
     storage.upload_bytes(video_key, raw, content_type="video/mp4")
 
     async with session_scope() as session:

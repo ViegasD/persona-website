@@ -151,6 +151,25 @@ async def make_orders(database, balance=1, count=2):
 
 
 @pytest.mark.asyncio
+async def test_verified_mailbox_exposes_only_unowned_matching_guest_orders(database):
+    user_id, ids = await make_orders(database, count=2)
+    async with database() as session:
+        user = await session.get(User, user_id)
+        first = await session.get(Order, ids[0])
+        second = await session.get(Order, ids[1])
+        first.user_id = None; first.guest_email = user.email.upper()
+        second.user_id = None; second.guest_email = "different@example.com"
+        await session.commit()
+        assert first.id in [order.id for order in await orders.my_orders(user_id, session)]
+        assert second.id not in [order.id for order in await orders.my_orders(user_id, session)]
+        user.email_verified_at = None
+        await session.commit()
+        assert first.id not in [order.id for order in await orders.my_orders(user_id, session)]
+        # The read-only association does not rewrite the guest order.
+        assert first.user_id is None
+
+
+@pytest.mark.asyncio
 async def test_website_delivery_download_without_whatsapp_and_while_paused(database, monkeypatch):
     from app.db.models import Delivery, DeliveryChannel
     from app.services import delivery
