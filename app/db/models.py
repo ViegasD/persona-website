@@ -558,7 +558,8 @@ class ApiCostLog(Base):
     external API call so the admin dashboard can track spend per provider."""
 
     __tablename__ = "api_cost_log"
-    __table_args__ = (Index("ix_api_cost_log_order_item_id", "order_item_id"),)
+    __table_args__ = (Index("ix_api_cost_log_order_item_id", "order_item_id"),
+                      UniqueConstraint("provider","provider_request_id","operation",name="uq_cost_provider_request"))
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     order_item_id: Mapped[int | None] = mapped_column(
@@ -568,9 +569,45 @@ class ApiCostLog(Base):
     # e.g. "video_generation", "composite_image"
     operation: Mapped[str] = mapped_column(String(64), nullable=False)
     cost_micro_usd: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    cost_source: Mapped[str] = mapped_column(String(24), default="estimated", server_default="estimated", nullable=False)
+    provider_request_id: Mapped[str | None] = mapped_column(String(128))
+    model: Mapped[str | None] = mapped_column(String(128))
+    usage: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False, index=True
     )
+
+
+class FinanceSettings(Base):
+    __tablename__ = "finance_settings"
+    __table_args__ = (CheckConstraint("id = 1", name="single_finance_settings"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    revision: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    usd_brl: Mapped[Decimal | None] = mapped_column(Numeric(12, 6))
+    estimated_fee_bps: Mapped[int | None] = mapped_column(Integer)
+    estimated_fee_fixed_cents: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    overhead_per_video_cents: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    model_rates: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, server_default="{}", nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class OrderFinanceNote(Base):
+    __tablename__ = "order_finance_note"
+    order_id: Mapped[int] = mapped_column(ForeignKey(f"{SCHEMA}.order.id"), primary_key=True)
+    is_test: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    note: Mapped[str | None] = mapped_column(Text)
+    fee_override_cents: Mapped[int | None] = mapped_column(Integer)
+    additional_cost_cents: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class PaymentFinanceSnapshot(Base):
+    __tablename__ = "payment_finance_snapshot"
+    payment_id: Mapped[int] = mapped_column(ForeignKey(f"{SCHEMA}.payment.id"), primary_key=True)
+    fee_cents: Mapped[int | None] = mapped_column(Integer)
+    refunded_cents: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    net_received_cents: Mapped[int | None] = mapped_column(Integer)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
 __all__ = [

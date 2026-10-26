@@ -55,6 +55,7 @@ async def storefront_settings(session: AsyncSession = Depends(get_session)) -> d
             "credit_purchase_enabled": False,
             "default_video_duration_seconds": settings.xai_video_duration_seconds,
             "default_video_model": settings.xai_video_model,
+            "default_script_model": settings.openai_model,
         },
     }
 
@@ -148,6 +149,9 @@ async def order_videos(order_id: int, session: AsyncSession = Depends(get_sessio
     base = get_settings().api_base_url.rstrip("/")
     items = []
     for item in order.items:
+        from app.workers.batch_runner import _extract_child_meta
+        import re
+        name,age,occasion,message=_extract_child_meta(item.custom_message)
         url = f"{base}/api/v1/media/{sign_media_preview_token(item.id)}"
         items.append({
             "item_id": item.id, "sequence": item.sequence, "status": item.status.value,
@@ -155,9 +159,13 @@ async def order_videos(order_id: int, session: AsyncSession = Depends(get_sessio
             "video_url": url if item.video_s3_key else None,
             "scene_url": url + "?scene=true" if item.composite_image_s3_key else None,
             "thumbnail_url": url + "?thumbnail=true" if item.thumbnail_s3_key else None,
+            "recipient_name":name or order.recipient_name,"recipient_age":age or order.recipient_age,
+            "occasion":occasion or order.occasion_slug,"message":message,
+            "error":re.sub(r'https?://\S+','[URL omitida]',item.error or '')[:500] or None,
         })
     return {"order_id": order.id, "status": order.status.value,
-            "recipient_name": order.recipient_name, "items": items}
+            "recipient_name": order.recipient_name,"email":order.guest_email,"phone":order.guest_phone,
+            "created_at":order.created_at,"paid_at":order.paid_at,"delivered_at":order.delivered_at,"items": items}
 
 
 @router.post("/orders/{order_id}/reprocess", status_code=status.HTTP_200_OK)

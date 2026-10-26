@@ -4,6 +4,7 @@ import json
 from dataclasses import dataclass
 from openai import AsyncOpenAI
 from app.core.settings import get_settings
+from app.services.cost_tracking import record_openai_usage
 
 MAX_ATTEMPTS = 3
 OCCASIONS = {
@@ -39,6 +40,7 @@ async def _chat_json(messages: list[dict[str, str]]) -> dict:
         model=settings.openai_model, messages=messages, response_format={"type": "json_object"},
         max_completion_tokens=800, **extra,
     )
+    await record_openai_usage(completion.usage,settings.openai_model)
     return json.loads(completion.choices[0].message.content or "{}")
 
 async def generate_structured_script(*, characters: list[CharacterSpec], recipient_name: str,

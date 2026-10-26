@@ -5,6 +5,7 @@ import os
 import re
 import uuid
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -148,6 +149,46 @@ async def make_orders(database, balance=1, count=2):
             ids.append(order.id)
         await session.commit()
         return user.id, ids
+
+
+@pytest.mark.asyncio
+async def test_finance_reporting_notes_and_reconciliation_preserve_orders(database,monkeypatch):
+    from fastapi import FastAPI
+    from httpx import AsyncClient,ASGITransport
+    from app.api.v1 import admin_finance
+    from app.db.session import get_session
+    from app.db.models import ApiCostLog
+    from app.services import finance
+    user_id,ids=await make_orders(database,count=1)
+    async with database() as s:
+        order=await s.get(Order,ids[0]);order.status=OrderStatus.DELIVERED
+        item=(await s.execute(select(OrderItem).where(OrderItem.order_id==order.id))).scalar_one()
+        item.status=OrderItemStatus.READY
+        payment=Payment(order_id=order.id,provider='mercadopago',provider_id='finance-'+uuid.uuid4().hex,status=PaymentStatus.APPROVED,amount_cents=1990,funds_order=True)
+        s.add(payment);s.add(ApiCostLog(order_item_id=item.id,provider='xai',operation='video_generation',cost_micro_usd=1_000_000))
+        original=await finance.settings(s)
+        await finance.save_settings(s,finance.FinanceValues(revision=original.revision,usd_brl=Decimal('5')))
+        await s.commit()
+        provider_id=payment.provider_id
+    app=FastAPI();app.include_router(admin_finance.router)
+    async def dependency():
+        async with database() as s:yield s
+    app.dependency_overrides[get_session]=dependency
+    monkeypatch.setattr(admin_finance.mercadopago_client,'get_payment_details',AsyncMock(return_value={
+        'id':provider_id,'external_reference':f'web_{ids[0]}','currency_id':'BRL','amount':'19.90','fee_details':[{'amount':'1.00'}]}))
+    async with AsyncClient(transport=ASGITransport(app=app),base_url='http://test',headers={'X-Api-Key':'admin-key'}) as c:
+        assert (await c.post(f'/admin/orders/{ids[0]}/reconcile-fees')).status_code==200
+        result=(await c.get('/admin/finance',params={'order_id':ids[0]})).json()
+        assert result['items'][0]['fee_cents']==100
+        assert result['items'][0]['contribution_cents']==1390
+        assert (await c.put(f'/admin/orders/{ids[0]}/finance-note',json={'is_test':True,'note':'QA metadata only'})).status_code==200
+        assert (await c.get('/admin/finance',params={'q':f'#{ids[0]}'})).json()['total']==0
+        assert (await c.get('/admin/finance',params={'q':f'#{ids[0]}','include_tests':'true'})).json()['total']==1
+    async with database() as s:
+        order=await s.get(Order,ids[0]);user=await s.get(User,user_id)
+        assert order.status==OrderStatus.DELIVERED and order.total_cents==1990 and user.credit_balance==1
+        current=await finance.settings(s)
+        await finance.save_settings(s,original.model_copy(update={'revision':current.revision}))
 
 
 @pytest.mark.asyncio

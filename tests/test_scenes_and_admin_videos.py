@@ -59,8 +59,9 @@ async def test_bad_scene_cannot_reach_video_generation(monkeypatch,identity,back
 
 def test_admin_order_videos_are_authenticated_signed_and_do_not_expose_storage():
     item=SimpleNamespace(id=1,sequence=1,status=OrderItemStatus.READY,character_ids=["bela"],
-                         video_s3_key="private/video.mp4",composite_image_s3_key="private/scene.png",thumbnail_s3_key="private/thumb.jpg")
-    order=SimpleNamespace(id=177,status=OrderStatus.DELIVERED,recipient_name="Test",items=[item])
+                         video_s3_key="private/video.mp4",composite_image_s3_key="private/scene.png",thumbnail_s3_key="private/thumb.jpg",custom_message=None,error=None)
+    order=SimpleNamespace(id=177,status=OrderStatus.DELIVERED,recipient_name="Test",recipient_age=None,occasion_slug=None,
+                          guest_email=None,guest_phone=None,created_at=None,paid_at=None,delivered_at=None,items=[item])
     session=SimpleNamespace(execute=AsyncMock(return_value=SimpleNamespace(scalar_one_or_none=lambda:order)))
     app=FastAPI();app.include_router(admin.router);app.dependency_overrides[get_session]=lambda:session
     client=TestClient(app)

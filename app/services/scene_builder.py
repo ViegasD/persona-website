@@ -5,6 +5,7 @@ import json
 from PIL import Image
 from openai import AsyncOpenAI
 from app.core.settings import get_settings
+from app.services.cost_tracking import record_openai_usage
 
 SCENE_VERSION = "finished-scene-v4"
 
@@ -92,6 +93,7 @@ async def review_scene(reference_urls: list[str], scene_url: str) -> dict:
         model=settings.openai_model, messages=[{"role": "user", "content": content}],
         response_format={"type": "json_object"}, max_completion_tokens=500,
     )
+    await record_openai_usage(getattr(result,'usage',None),settings.openai_model)
     verdict = json.loads(result.choices[0].message.content or "{}")
     if not all(verdict.get(key) is True for key in ["identity_preserved", "full_background", "prominent_subjects"]):
         raise ValueError("scene failed character/background review; manual review required")

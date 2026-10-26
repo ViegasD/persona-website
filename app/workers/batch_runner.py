@@ -52,6 +52,7 @@ from app.services.prompt_builder import (
 )
 from app.services.worker_recovery import recover_interrupted_jobs
 from app.services.generation_config import read_generation_config
+from app.services.cost_tracking import tracked, reconcile_xai_usage
 from app.workers.queue import redis_settings
 
 # ─────────────────────────── helpers ──────────────────────────────────────
@@ -104,7 +105,7 @@ def composite_cache_key(
 
 async def _log_api_cost(
     provider: str, operation: str, order_item_id: int | None = None,
-    *, duration: int | None = None, resolution: str | None = None,
+    *, duration: int | None = None, resolution: str | None = None, request_id: str | None = None, model: str | None = None,
 ) -> None:
     """Insert an ApiCostLog row using the configured cost estimate for the provider+operation."""
     s = get_settings()
@@ -125,6 +126,7 @@ async def _log_api_cost(
                 provider=provider,
                 operation=operation,
                 cost_micro_usd=cost,
+                provider_request_id=request_id,model=model,
             ))
             await session.commit()
     except Exception as exc:  # noqa: BLE001
@@ -166,6 +168,7 @@ async def _load_characters(character_slugs: list[str]) -> list[dict[str, Any]]:
     return out
 
 
+@tracked
 async def _resolve_composite_url(
     item: OrderItem,
     chars: list[dict[str, Any]],
@@ -205,7 +208,7 @@ async def _resolve_composite_url(
         current = await session.get(OrderItem, item.id)
         current.comfy_workflow_a_prompt_id = task_id
         await session.commit()
-    await _log_api_cost("kie", "composite_image", item.id)
+    await _log_api_cost("kie", "composite_image", item.id,request_id=task_id,model=get_settings().kie_nano_banana_model)
     try:
         payload = await kie_client.wait_for_task(task_id)
         raw = await xai_client.download_image(kie_client.extract_first_image_url(payload))
@@ -218,7 +221,7 @@ async def _resolve_composite_url(
             current = await session.get(OrderItem, item.id)
             current.comfy_workflow_a_prompt_id = task_id
             await session.commit()
-        await _log_api_cost("kie", "composite_image", item.id)
+        await _log_api_cost("kie", "composite_image", item.id,request_id=task_id,model=get_settings().kie_nano_banana_model)
         payload = await kie_client.wait_for_task(task_id)
         background = await xai_client.download_image(kie_client.extract_first_image_url(payload))
         original = await asyncio.to_thread(storage.download_bytes, chars[0]["s3_key"])
@@ -650,6 +653,7 @@ async def generate_video_for_approved_item(ctx: dict[str, Any], item_id: int) ->
 # ─────────────────────────── shared video helper ──────────────────────────
 
 
+@tracked
 async def _generate_and_store_video(
     *,
     item_id: int,
@@ -719,7 +723,7 @@ async def _generate_and_store_video(
         resolution="720p" if quality == "hd" else "480p",
     )
     await _log_api_cost("xai", "video_generation", item_id, duration=generation.duration,
-                        resolution="720p" if quality == "hd" else "480p")
+                        resolution="720p" if quality == "hd" else "480p",request_id=request_id,model=generation.model)
     logger.info("[item {item}] reference_sha256={sha} request_id={rid}", item=item_id,
                 sha=hashlib.sha256(input_image_url.encode()).hexdigest(), rid=request_id)
     async with session_scope() as session:
@@ -728,6 +732,7 @@ async def _generate_and_store_video(
         item.resolved_script = prompt_text
         await session.commit()
     result = await xai_client.wait_for_video(request_id)
+    await reconcile_xai_usage(request_id,result)
     video_info = result.get("video") or {}
     video_url = video_info.get("url")
     if not video_url:

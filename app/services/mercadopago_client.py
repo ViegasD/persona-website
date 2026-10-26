@@ -13,7 +13,6 @@ from typing import Any
 import mercadopago
 import qrcode
 from mercadopago.config.request_options import RequestOptions
-from mercadopago.config import RequestOptions
 from qrcode.constants import ERROR_CORRECT_H
 
 from app.core.settings import get_settings
@@ -156,6 +155,9 @@ async def get_payment_details(payment_id: str) -> dict[str, Any]:
         "amount": payment.get("transaction_amount"),
         "amount_refunded": payment.get("transaction_amount_refunded"),
         "paid_at": payment.get("date_approved"),
+        "currency_id": payment.get("currency_id"),
+        "fee_details": payment.get("fee_details"),
+        "net_received_amount": (payment.get("transaction_details") or {}).get("net_received_amount"),
     }
 
 
