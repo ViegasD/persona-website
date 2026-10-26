@@ -88,6 +88,7 @@ def _extract_child_meta(
 def composite_cache_key(
     character_ids: list[str], recipient_name: str | None, occasion_slug: str | None,
     *, reference_hashes: list[str] | None = None, model: str | None = None,
+    scene_context: dict | None = None,
 ) -> str:
     payload = json.dumps(
         {
@@ -97,6 +98,7 @@ def composite_cache_key(
             "prompt_version": scene_builder.SCENE_VERSION,
             "recipient": (recipient_name or "").strip().lower(),
             "occasion": (occasion_slug or "").strip().lower(),
+            "scene_context": scene_context or {},
         },
         sort_keys=True,
     )
@@ -175,13 +177,15 @@ async def _resolve_composite_url(
     *,
     recipient_name: str | None,
     occasion_slug: str | None,
+    custom_message: str | None = None,
 ) -> tuple[str, str | None]:
     """Return ``(input_image_url, composite_s3_key_or_None)``.
 
     All videos start from a finished, reference-preserving background scene.
     """
+    context = scene_builder.scene_context(occasion_slug, custom_message)
     sha = composite_cache_key(item.character_ids, recipient_name, occasion_slug,
-                              reference_hashes=[c["reference_sha256"] for c in chars])
+                              reference_hashes=[c["reference_sha256"] for c in chars], scene_context=context)
     async with session_scope() as session:
         cached = (
             await session.execute(
@@ -195,7 +199,7 @@ async def _resolve_composite_url(
             await session.commit()
         return await asyncio.to_thread(storage.get_image_as_data_url, cached.s3_key), cached.s3_key
 
-    composite_prompt = scene_builder.scene_prompt([c["name"] for c in chars], occasion_slug)
+    composite_prompt = scene_builder.scene_prompt([c["name"] for c in chars], occasion_slug, context=context)
     # KIE image_input requires public HTTP URLs, not data URIs.
     kie_image_urls = [storage.presigned_get_url(c["s3_key"], expires_in=3600) for c in chars]
     task_id = await kie_client.create_composite_task(
@@ -216,7 +220,7 @@ async def _resolve_composite_url(
         if len(chars) != 1 or "content policy" not in str(exc).lower():
             raise
         # Compose the existing catalog artwork unchanged over scenery generated on its own.
-        task_id = await kie_client.create_composite_task(prompt=scene_builder.background_prompt(occasion_slug), image_urls=[])
+        task_id = await kie_client.create_composite_task(prompt=scene_builder.background_prompt(occasion_slug, context=context), image_urls=[])
         async with session_scope() as session:
             current = await session.get(OrderItem, item.id)
             current.comfy_workflow_a_prompt_id = task_id
@@ -236,11 +240,11 @@ async def _resolve_composite_url(
         current.comfy_workflow_a_prompt_id = task_id
         await session.commit()
     original_refs = [await asyncio.to_thread(storage.get_image_as_data_url, c["s3_key"]) for c in chars]
-    verdict = await scene_builder.review_scene(original_refs, candidate)
+    verdict = await scene_builder.review_scene(original_refs, candidate, context=context)
     async with session_scope() as session:
         session.add(
             CompositeFrameCache(sha=sha, s3_key=s3_key, character_ids=item.character_ids,
-                                payload={"review": verdict, "version": scene_builder.SCENE_VERSION})
+                                payload={"review": verdict, "version": scene_builder.SCENE_VERSION, "scene_context": context})
         )
         await session.commit()
     return await asyncio.to_thread(storage.get_image_as_data_url, s3_key), s3_key
@@ -286,6 +290,7 @@ async def _generate_video_for_item(item_id: int) -> None:
         item, chars,
         recipient_name=recipient_name,
         occasion_slug=occasion_slug,
+        custom_message=custom_message,
     )
 
     async with session_scope() as session:
@@ -498,6 +503,7 @@ async def process_item_phase1(ctx: dict[str, Any], item_id: int) -> None:  # noq
                 item, chars,
                 recipient_name=recipient_name,
                 occasion_slug=occasion_slug,
+                custom_message=custom_message,
             )
             async with session_scope() as session:
                 item = (
@@ -514,6 +520,7 @@ async def process_item_phase1(ctx: dict[str, Any], item_id: int) -> None:  # noq
                 item, chars,
                 recipient_name=recipient_name,
                 occasion_slug=occasion_slug,
+                custom_message=custom_message,
             )
             await _generate_and_store_video(
                 item_id=item_id,
@@ -589,7 +596,8 @@ async def generate_video_for_approved_item(ctx: dict[str, Any], item_id: int) ->
             input_image_url = (
                 await asyncio.to_thread(storage.get_image_as_data_url, composite_key)
                 if composite_key
-                else (await _resolve_composite_url(item, chars, recipient_name=recipient_name, occasion_slug=occasion_slug))[0]
+                else (await _resolve_composite_url(item, chars, recipient_name=recipient_name, occasion_slug=occasion_slug,
+                                                 custom_message=custom_message))[0]
             )
             async with session_scope() as session:
                 item = (
@@ -697,7 +705,9 @@ async def _generate_and_store_video(
     )
     scene_description = (
         f"{char_names} — use the reference image exactly, preserve every visual detail of the character(s) — "
-        "preserving the original background, composition, pose and viewing angle. Do not introduce a new setting"
+        "preserving the original background, occasion props, composition, pose and viewing angle. "
+        "Keep cakes, gifts and decorations exactly as they appear in the reference; do not make props appear or disappear. "
+        "Do not introduce a new setting"
     )
     prompt_text = build_video_prompt(
         VideoPromptInputs(
