@@ -49,6 +49,7 @@ from app.services.prompt_builder import (
     CharacterLine,
     VideoPromptInputs,
     build_video_prompt,
+    character_voice_direction,
 )
 from app.services.worker_recovery import recover_interrupted_jobs
 from app.services.generation_config import read_generation_config
@@ -141,7 +142,7 @@ async def _load_characters(character_slugs: list[str]) -> list[dict[str, Any]]:
         rows = (
             await session.execute(
                 text(
-                    "SELECT slug, name, description, thumbnail_s3_key "
+                    "SELECT slug, name, description, thumbnail_s3_key, gender "
                     "FROM web.character_v WHERE slug = ANY(:slugs)"
                 ),
                 {"slugs": character_slugs},
@@ -165,6 +166,7 @@ async def _load_characters(character_slugs: list[str]) -> list[dict[str, Any]]:
                 "reference_url": url,
                 "s3_key": thumb_key,
                 "reference_sha256": hashlib.sha256(url.encode()).hexdigest(),
+                "voice_direction": character_voice_direction(slug, row[4]),
             }
         )
     return out
@@ -716,6 +718,7 @@ async def _generate_and_store_video(
                 CharacterLine(
                     descriptor=f"character in reference position {i + 1}",
                     line_pt=script.character_lines[i],
+                    voice_direction=chars[i].get("voice_direction", ""),
                 )
                 for i in range(len(chars))
             ],

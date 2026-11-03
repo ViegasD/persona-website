@@ -32,6 +32,21 @@ class CharacterLine:
 
     descriptor: str  # short visual hint, e.g. "short black hair in two buns"
     line_pt: str  # the Portuguese line itself
+    voice_direction: str = ""  # Curated direction, never spoken dialogue.
+
+
+def character_voice_direction(character_id: str, gender: str | None = None) -> str:
+    """Use explicit catalog metadata rather than guessing a voice from the image."""
+    if character_id == "gato-de-botas":
+        return ("An adult male Brazilian Portuguese speaking voice: warm, resonant, lower-register, "
+                "confident and playfully heroic. Clearly masculine, never feminine or childlike. "
+                "Do not imitate a specific real actor.")
+    value = (gender or "").strip().lower()
+    if value in {"masculino", "male", "masculine"}:
+        return "A masculine Brazilian Portuguese speaking voice appropriate to this character's age and personality."
+    if value in {"feminino", "female", "feminine"}:
+        return "A feminine Brazilian Portuguese speaking voice appropriate to this character's age and personality."
+    return ""
 
 
 @dataclass(slots=True)
@@ -87,6 +102,8 @@ def _build_single_character_prompt(inputs: VideoPromptInputs) -> str:
     parts.append("")
 
     descriptor = f" ({char.descriptor})" if char.descriptor else ""
+    if char.voice_direction:
+        parts.append(f"Voice direction (not spoken dialogue): {char.voice_direction}")
     parts.append(f"The character{descriptor} says in Brazilian Portuguese:")
     # Combine the individual line and the group line into one natural speech
     speech = f"{char.line_pt.strip()} {inputs.group_line_pt.strip()}"
@@ -133,6 +150,8 @@ def _build_multi_character_prompt(inputs: VideoPromptInputs) -> str:
             f"{ordinal}, the {label} character{descriptor} speaks, maintaining the same pose, "
             "only moving lips and slight facial expression."
         )
+        if char.voice_direction:
+            parts.append(f"Voice for the {label} speaker (not spoken dialogue): {char.voice_direction}")
         parts.append("They say in Brazilian Portuguese:")
         parts.append(char.line_pt.strip())
         parts.append("")
