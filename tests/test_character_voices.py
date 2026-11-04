@@ -27,4 +27,4 @@ def test_unknown_catalog_gender_does_not_invent_a_voice_profile():
 def test_legacy_prompt_callers_can_omit_voice_direction():
     prompt=build_video_prompt(VideoPromptInputs('Preserve the scene',[CharacterLine('','Oi!')],'',15))
     assert 'Voice direction (not spoken dialogue)' not in prompt
-    assert 'Keep body, hands, clothing and background still' in prompt
+    assert 'accurate lip sync' in prompt and 'small conversational nods' in prompt

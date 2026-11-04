@@ -42,7 +42,7 @@ from app.db.models import (
     OrderStatus,
 )
 from app.db.session import session_scope
-from app.services import delivery, kie_client, script_writer, storage, xai_client, scene_builder
+from app.services import delivery, kie_client, script_writer, storage, xai_client, scene_builder, scene_images
 from app.services.outbox import dispatch_outbox, record_delivery_job, record_video_jobs
 from app.services.processing_policy import processing_allowed, processing_enabled
 from app.services.prompt_builder import (
@@ -54,6 +54,7 @@ from app.services.prompt_builder import (
 from app.services.worker_recovery import recover_interrupted_jobs
 from app.services.generation_config import read_generation_config
 from app.services.cost_tracking import tracked, reconcile_xai_usage
+from app.services.provider_monitor import report_error, report_success, check_provider_balances
 from app.workers.queue import redis_settings
 
 # ─────────────────────────── helpers ──────────────────────────────────────
@@ -95,7 +96,8 @@ def composite_cache_key(
         {
             "characters": character_ids,
             "references": reference_hashes or [],
-            "model": model or get_settings().kie_nano_banana_model,
+            "model": model or (get_settings().xai_image_model if get_settings().scene_image_provider=='xai' else get_settings().kie_nano_banana_model),
+            "image_provider": get_settings().scene_image_provider,
             "prompt_version": scene_builder.SCENE_VERSION,
             "recipient": (recipient_name or "").strip().lower(),
             "occasion": (occasion_slug or "").strip().lower(),
@@ -134,6 +136,7 @@ async def _log_api_cost(
             await session.commit()
     except Exception as exc:  # noqa: BLE001
         logger.warning("Failed to log API cost: {exc}", exc=exc)
+    await report_success(provider)
 
 
 async def _load_characters(character_slugs: list[str]) -> list[dict[str, Any]]:
@@ -201,37 +204,20 @@ async def _resolve_composite_url(
             await session.commit()
         return await asyncio.to_thread(storage.get_image_as_data_url, cached.s3_key), cached.s3_key
 
-    composite_prompt = scene_builder.scene_prompt([c["name"] for c in chars], occasion_slug, context=context)
-    # KIE image_input requires public HTTP URLs, not data URIs.
-    kie_image_urls = [storage.presigned_get_url(c["s3_key"], expires_in=3600) for c in chars]
-    task_id = await kie_client.create_composite_task(
-        prompt=composite_prompt,
-        image_urls=kie_image_urls,
-        image_size="9:16",
-        output_format="PNG",
-    )
-    async with session_scope() as session:
-        current = await session.get(OrderItem, item.id)
-        current.comfy_workflow_a_prompt_id = task_id
-        await session.commit()
-    await _log_api_cost("kie", "composite_image", item.id,request_id=task_id,model=get_settings().kie_nano_banana_model)
-    try:
-        payload = await kie_client.wait_for_task(task_id)
-        raw = await xai_client.download_image(kie_client.extract_first_image_url(payload))
-    except kie_client.KieError as exc:
-        if len(chars) != 1 or "content policy" not in str(exc).lower():
-            raise
-        # Compose the existing catalog artwork unchanged over scenery generated on its own.
-        task_id = await kie_client.create_composite_task(prompt=scene_builder.background_prompt(occasion_slug, context=context), image_urls=[])
+    composite_prompt = scene_builder.scene_prompt([c["name"] for c in chars], occasion_slug, context=context, recipient_name=recipient_name)
+    if get_settings().scene_image_provider=='xai':
+        references=[storage.get_image_as_data_url(c['s3_key']) for c in chars]
+        raw,task_id=await scene_images.generate(composite_prompt,references,item.id)
+    else:
+        kie_image_urls = [storage.presigned_get_url(c["s3_key"], expires_in=3600) for c in chars]
+        task_id = await kie_client.create_composite_task(prompt=composite_prompt,image_urls=kie_image_urls,image_size="9:16",output_format="PNG")
         async with session_scope() as session:
             current = await session.get(OrderItem, item.id)
             current.comfy_workflow_a_prompt_id = task_id
             await session.commit()
         await _log_api_cost("kie", "composite_image", item.id,request_id=task_id,model=get_settings().kie_nano_banana_model)
         payload = await kie_client.wait_for_task(task_id)
-        background = await xai_client.download_image(kie_client.extract_first_image_url(payload))
-        original = await asyncio.to_thread(storage.download_bytes, chars[0]["s3_key"])
-        raw = await asyncio.to_thread(scene_builder.compose_original_on_background, original, background)
+        raw = await xai_client.download_image(kie_client.extract_first_image_url(payload))
     scene_builder.validate_scene_dimensions(raw)
     s3_key = storage.storefront_key("composites", f"{sha}.png")
     storage.upload_bytes(s3_key, raw, content_type="image/png")
@@ -242,7 +228,7 @@ async def _resolve_composite_url(
         current.comfy_workflow_a_prompt_id = task_id
         await session.commit()
     original_refs = [await asyncio.to_thread(storage.get_image_as_data_url, c["s3_key"]) for c in chars]
-    verdict = await scene_builder.review_scene(original_refs, candidate, context=context)
+    verdict = await scene_builder.review_scene(original_refs, candidate, context=context, recipient_name=recipient_name)
     async with session_scope() as session:
         session.add(
             CompositeFrameCache(sha=sha, s3_key=s3_key, character_ids=item.character_ids,
@@ -546,6 +532,7 @@ async def process_item_phase1(ctx: dict[str, Any], item_id: int) -> None:  # noq
                 item.status = OrderItemStatus.FAILED
                 item.error = str(exc)[:500]
                 await session.commit()
+        await report_error(exc)
         raise
 
 
@@ -657,6 +644,7 @@ async def generate_video_for_approved_item(ctx: dict[str, Any], item_id: int) ->
                 item.status = OrderItemStatus.FAILED
                 item.error = str(exc)[:500]
                 await session.commit()
+        await report_error(exc)
         raise
 
 
@@ -676,12 +664,20 @@ async def _generate_and_store_video(
     quality: str = "sd",
     queue_phase2: bool = False,
     phase2_generation: str = "",
+    revision_id: int | None = None,
+    voice_override: str = "catalog",
 ) -> None:
     """Generate video via xAI Grok and store in S3, updating the OrderItem row."""
     settings = get_settings()
 
     async with session_scope() as session:
         generation = await read_generation_config(session)
+        if revision_id is not None:
+            from app.db.models import VideoRevision
+            from app.services.generation_config import GenerationConfig
+            revision = await session.get(VideoRevision, revision_id)
+            if revision.duration and revision.model:
+                generation = GenerationConfig(revision.duration, revision.model)
 
     script = await script_writer.generate_structured_script(
         characters=[
@@ -718,15 +714,22 @@ async def _generate_and_store_video(
                 CharacterLine(
                     descriptor=f"character in reference position {i + 1}",
                     line_pt=script.character_lines[i],
-                    voice_direction=chars[i].get("voice_direction", ""),
+                    voice_direction=(chars[i].get("voice_direction", "") if voice_override == "catalog" else
+                        "An unmistakably masculine Brazilian Portuguese speaking voice, with warm lower-register resonance." if voice_override == "male" else
+                        "A clearly feminine Brazilian Portuguese speaking voice appropriate to the character."),
                 )
                 for i in range(len(chars))
             ],
             group_line_pt=script.group_line,
             duration_seconds=generation.duration,
+            action_direction=scene_builder.video_actions(scene_builder.scene_context(occasion_slug,custom_message)),
         )
     )
 
+    if revision_id is not None:
+        async with session_scope() as session:
+            revision = await session.get(VideoRevision, revision_id)
+            revision.phase = 'video_submitting'; revision.prompt = prompt_text
     request_id = await xai_client.start_image_to_video(
         prompt=prompt_text,
         image_url=input_image_url,
@@ -734,15 +737,20 @@ async def _generate_and_store_video(
         model=generation.model,
         aspect_ratio=settings.xai_video_aspect_ratio,
         resolution="720p" if quality == "hd" else "480p",
+        submission_attempts=1 if revision_id is not None else None,
     )
     await _log_api_cost("xai", "video_generation", item_id, duration=generation.duration,
                         resolution="720p" if quality == "hd" else "480p",request_id=request_id,model=generation.model)
     logger.info("[item {item}] reference_sha256={sha} request_id={rid}", item=item_id,
                 sha=hashlib.sha256(input_image_url.encode()).hexdigest(), rid=request_id)
     async with session_scope() as session:
-        item = await session.get(OrderItem, item_id)
-        item.comfy_workflow_b_prompt_id = request_id
-        item.resolved_script = prompt_text
+        if revision_id is not None:
+            revision = await session.get(VideoRevision, revision_id)
+            revision.video_request_id = request_id; revision.prompt = prompt_text; revision.phase = 'video_polling'
+        else:
+            item = await session.get(OrderItem, item_id)
+            item.comfy_workflow_b_prompt_id = request_id
+            item.resolved_script = prompt_text
         await session.commit()
     result = await xai_client.wait_for_video(request_id)
     await reconcile_xai_usage(request_id,result)
@@ -766,10 +774,14 @@ async def _generate_and_store_video(
         item = (
             await session.execute(select(OrderItem).where(OrderItem.id == item_id))
         ).scalar_one()
-        item.comfy_workflow_b_prompt_id = request_id  # repurposed: xAI request id
-        item.resolved_script = prompt_text
-        item.video_s3_key = video_key
-        if queue_phase2:
+        if revision_id is not None:
+            revision = await session.get(VideoRevision, revision_id)
+            revision.video_key = video_key; revision.phase = 'video_stored'
+        else:
+            item.comfy_workflow_b_prompt_id = request_id  # repurposed: xAI request id
+            item.resolved_script = prompt_text
+            item.video_s3_key = video_key
+        if queue_phase2 and revision_id is None:
             order = await session.get(Order, item.order_id)
             await record_video_jobs(session, order, [item_id], kind="generate_video", generation=phase2_generation)
         await session.commit()
@@ -778,12 +790,18 @@ async def _generate_and_store_video(
 # ─────────────────────────── arq settings ─────────────────────────────────
 
 
+from app.services.video_revisions import generate_video_revision
+from app.services.activity import prune_activity
+
+
 class WorkerSettings:
     queue_name = get_settings().video_queue_name
-    functions = [run_batch, collector_check, process_item_phase1, generate_video_for_approved_item, dispatch_outbox, recover_interrupted_jobs]
+    functions = [run_batch, collector_check, process_item_phase1, generate_video_for_approved_item, dispatch_outbox, recover_interrupted_jobs, generate_video_revision]
     redis_settings = redis_settings()
     cron_jobs = [cron(dispatch_outbox, second={0, 10, 20, 30, 40, 50}, run_at_startup=True),
-                 cron(recover_interrupted_jobs, minute={0, 15, 30, 45}, run_at_startup=True)]
+                 cron(recover_interrupted_jobs, minute={0, 15, 30, 45}, run_at_startup=True),
+                 cron(check_provider_balances, minute=set(range(0,60,5)), second=5, run_at_startup=True),
+                 cron(prune_activity,hour=6,minute=0)]
 
     @staticmethod
     async def on_startup(ctx: dict) -> None:  # noqa: ARG004
@@ -802,7 +820,9 @@ class AccountWorkerSettings(WorkerSettings):
     redis_settings = redis_settings()
     queue_name = "persona:account:queue"
     functions = [dispatch_outbox]
-    cron_jobs = [cron(dispatch_outbox, second={0, 10, 20, 30, 40, 50}, run_at_startup=True)]
+    cron_jobs = [cron(dispatch_outbox, second={0, 10, 20, 30, 40, 50}, run_at_startup=True),
+                 cron(check_provider_balances, minute=set(range(0,60,5)), second=5, run_at_startup=True),
+                 cron(prune_activity,hour=6,minute=0)]
 
     @staticmethod
     async def on_startup(ctx: dict) -> None:  # noqa: ARG004

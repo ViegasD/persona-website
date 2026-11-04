@@ -60,6 +60,8 @@ class Settings(BaseSettings):
 
     # --- xAI Grok Imagine (image-to-video) ---
     xai_api_key: str | None = Field(None, alias="XAI_API_KEY")
+    xai_management_api_key: str | None = Field(None, alias="XAI_MANAGEMENT_API_KEY")
+    xai_team_id: str | None = Field(None, alias="XAI_TEAM_ID", pattern=r"^[a-zA-Z0-9_-]+$")
     xai_api_base: str = Field("https://api.x.ai/v1", alias="XAI_API_BASE")
     xai_video_model: str = Field("grok-imagine-video", alias="XAI_VIDEO_MODEL")
     xai_video_duration_seconds: int = Field(8, alias="XAI_VIDEO_DURATION_SECONDS", ge=1, le=15)
@@ -108,6 +110,8 @@ class Settings(BaseSettings):
     facebook_pixel_id: str | None = Field(None, alias="FACEBOOK_PIXEL_ID")
     facebook_capi_token: str | None = Field(None, alias="FACEBOOK_CAPI_TOKEN")
 
+    scene_image_provider: str = Field('xai', alias='SCENE_IMAGE_PROVIDER', pattern='^(xai|kie)$')
+    xai_image_model: str = Field('grok-imagine-image-2.0', alias='XAI_IMAGE_MODEL', pattern='^grok-imagine-image(-2\\.0)?$')
     # --- API cost estimates (micro-USD = 1/1_000_000 USD) ---
     # xAI charges per second of video, rate depends on resolution.
     cost_xai_hd_per_sec_micro_usd: int = Field(70_000, alias="COST_XAI_HD_PER_SEC_MICRO_USD")   # $0.07/sec (720p+)

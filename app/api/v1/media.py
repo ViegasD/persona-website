@@ -17,12 +17,28 @@ from fastapi import APIRouter, Header, HTTPException, Response, status
 from starlette.concurrency import run_in_threadpool
 from sqlalchemy import select
 
-from app.core.security import verify_media_preview_token, verify_media_token
-from app.db.models import Order, OrderItem, OrderItemStatus, OrderStatus
+from app.core.security import verify_media_preview_token, verify_media_token, verify_revision_token
+from app.db.models import Order, OrderItem, OrderItemStatus, OrderStatus, VideoRevision
 from app.db.session import session_scope
 from app.services import storage
 
 router = APIRouter(prefix="/media", tags=["media"])
+
+
+@router.get('/revisions/{token}')
+async def revision_media(token: str, scene: bool = False,
+                         range_header: Annotated[str | None, Header(alias='Range')] = None):
+    revision_id = verify_revision_token(token)
+    if revision_id is None:
+        raise HTTPException(401, 'invalid or expired token')
+    async with session_scope() as session:
+        revision = await session.get(VideoRevision, revision_id)
+        if revision is None:
+            raise HTTPException(404)
+        key = revision.scene_key if scene else revision.video_key
+    if not key:
+        raise HTTPException(404, 'media not ready')
+    return await serve_key(key, not scene, revision_id, range_header, no_store=True)
 
 
 @router.get("/{token}")
@@ -69,6 +85,11 @@ async def proxy_media(token: str, thumbnail: bool = False, scene: bool = False,
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="media not ready")
 
     is_video = bool(item.video_s3_key)
+    return await serve_key(s3_key, is_video, item_id, range_header)
+
+
+async def serve_key(s3_key, is_video, item_id, range_header, no_store=False):
+    cache = 'private, no-store' if no_store else 'private, max-age=3600'
     if is_video and range_header is not None:
         if (len(range_header) > 100 or range_header == "bytes=-"
                 or not re.fullmatch(r"bytes=\d*-\d*", range_header)):
@@ -81,7 +102,7 @@ async def proxy_media(token: str, thumbnail: bool = False, scene: bool = False,
                 raise HTTPException(416, detail="range outside video", headers={"Content-Range": f"bytes */{total}"}) from None
             raise HTTPException(503, detail="video temporarily unavailable") from None
         return Response(data, status_code=206, media_type="video/mp4", headers={
-            "Content-Range": content_range, "Accept-Ranges": "bytes", "Cache-Control": "private, max-age=3600",
+            "Content-Range": content_range, "Accept-Ranges": "bytes", "Cache-Control": cache,
             "Content-Disposition": f'inline; filename="video_{item_id}.mp4"',
         })
     data = await run_in_threadpool(storage.download_bytes, s3_key)
@@ -92,7 +113,7 @@ async def proxy_media(token: str, thumbnail: bool = False, scene: bool = False,
         media_type=content_type,
         headers={
             "Accept-Ranges": "bytes" if is_video else "none",
-            "Cache-Control": "private, max-age=3600",
+            "Cache-Control": cache,
             "Content-Disposition": f'inline; filename="video_{item_id}.{ext}"',
         },
     )

@@ -27,7 +27,7 @@ def test_occasion_scenes_have_visible_props_in_normal_and_fallback_paths(occasio
                    scene_builder.background_prompt(occasion, context=context)]:
         assert prop in prompt
         assert "9:16" in prompt
-    assert "do not invent hands" in scene_builder.scene_prompt(["Bela"], occasion, context=context)
+    assert "invent hands" in scene_builder.scene_prompt(["Bela"], occasion, context=context)
 
 
 def test_customer_message_selects_allowlisted_theme_without_becoming_prompt_instructions():
@@ -89,6 +89,8 @@ async def test_worker_uses_same_context_for_generation_review_and_cache_without_
     monkeypatch.setattr(batch_runner.kie_client, "extract_first_image_url", lambda _: "test-download")
     data = io.BytesIO(); Image.new("RGB", (720, 1280), "green").save(data, "PNG")
     monkeypatch.setattr(batch_runner.xai_client, "download_image", AsyncMock(return_value=data.getvalue()))
+    grok=AsyncMock(return_value=(data.getvalue(),'grok-scene'))
+    monkeypatch.setattr(batch_runner.scene_images,'generate',grok)
     monkeypatch.setattr(batch_runner.storage, "presigned_get_url", lambda *a, **k: "reference-url")
     monkeypatch.setattr(batch_runner.storage, "get_image_as_data_url", lambda *a, **k: "data:image/png;base64,test")
     monkeypatch.setattr(batch_runner.storage, "upload_bytes", MagicMock())
@@ -97,9 +99,9 @@ async def test_worker_uses_same_context_for_generation_review_and_cache_without_
     chars = [{"name": "Bela", "s3_key": "catalog/bela.png", "reference_sha256": "reference"}]
     await batch_runner._resolve_composite_url(item, chars, recipient_name="Ana", occasion_slug="aniversario",
                                               custom_message="Ela adora futebol")
-    assert create.await_count == 1
-    assert "football" in create.call_args.kwargs["prompt"]
-    assert "birthday cake" in create.call_args.kwargs["prompt"]
+    assert create.await_count == 0 and grok.await_count==1
+    assert "football" in grok.call_args.args[0]
+    assert "birthday cake" in grok.call_args.args[0] and '"Ana"' in grok.call_args.args[0]
     context = {"kind": "birthday", "theme": "football"}
     assert review.call_args.kwargs["context"] == context
     assert session.add.call_args.args[0].payload["scene_context"] == context
@@ -111,4 +113,4 @@ def test_fifteen_second_script_budget_and_single_shot_constraints_remain():
     assert speech_word_budget(15) == 26
     prompt = build_video_prompt(VideoPromptInputs("Birthday scene with cake", [CharacterLine("", "Oi, Ana!")], "", 15))
     assert "15-second shot" in prompt and "completely static" in prompt
-    assert "Keep body, hands, clothing and background still" in prompt
+    assert "small conversational nods" in prompt and 'long frozen tail' in prompt

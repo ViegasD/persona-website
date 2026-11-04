@@ -125,6 +125,7 @@ class OrderItemOut(BaseModel):
     status: OrderItemStatus
     video_url: str | None = None
     thumbnail_url: str | None = None
+    video_version: str | None = None
 
 
 class OrderCreate(BaseModel):

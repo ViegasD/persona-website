@@ -43,6 +43,10 @@ def _response_error(resp: httpx.Response) -> XaiError:
     data = _error_data(resp)
     nested = data.get("error")
     code = data.get("code") or (nested.get("code") if isinstance(nested, dict) else None)
+    message=str(data).lower()
+    if (('credit' in message and any(word in message for word in ('insufficient','exhausted','not enough'))) or
+            any(word in message for word in ('no credits', 'insufficient balance'))):
+        code = 'credit_balance_exhausted'
     safe_code = code if isinstance(code, str) and re.fullmatch(r"[a-zA-Z0-9_-]{1,64}", code) else "unknown"
     return XaiError(f"xAI HTTP {resp.status_code} ({safe_code})")
 
@@ -90,6 +94,7 @@ async def start_image_to_video(
     aspect_ratio: str = "9:16",
     resolution: str = "720p",
     model: str | None = None,
+    submission_attempts: int | None = None,
 ) -> str:
     if not image_url.strip():
         raise ValueError("a reference image is required for image-to-video")
@@ -114,7 +119,8 @@ async def start_image_to_video(
         ar=body["aspect_ratio"],
         plen=len(prompt),
     )
-    for attempt in range(_MAX_RETRIES):
+    attempts = submission_attempts or _MAX_RETRIES
+    for attempt in range(attempts):
         try:
             async with httpx.AsyncClient(timeout=60) as client:
                 resp = await client.post(url, json=body, headers=_headers())
@@ -125,7 +131,7 @@ async def start_image_to_video(
             if resp.status_code >= 400:
                 raise _response_error(resp)
             break
-        if attempt == _MAX_RETRIES - 1:
+        if attempt == attempts - 1:
             raise _response_error(resp)
         delay = _delay(resp, attempt)
         logger.warning(

@@ -10,6 +10,7 @@ import time
 import httpx
 
 from app.core.settings import get_settings
+from app.services.activity import record
 
 logger = logging.getLogger(__name__)
 
@@ -96,6 +97,7 @@ async def _send_event(
 
     if not pixel_id or not token:
         logger.debug("Facebook CAPI not configured — skipping %s", event_name)
+        await record('capi',event_name,event_id,'not_configured')
         return
 
     payload = {
@@ -117,6 +119,7 @@ async def _send_event(
 
     url = _CAPI_URL.format(pixel_id=pixel_id)
 
+    outcome='error';error_code=None
     try:
         async with httpx.AsyncClient(timeout=10) as client:
             resp = await client.post(
@@ -125,9 +128,13 @@ async def _send_event(
                 json=payload,
             )
         if resp.status_code >= 400:
-            logger.warning(
-                "Meta CAPI %s failed (event_id=%s): %s %s",
-                event_name, event_id, resp.status_code, resp.text[:300],
-            )
+            error_code=f'HTTP_{resp.status_code}'
+            logger.warning('Meta CAPI %s failed: HTTP %s',event_name,resp.status_code)
+        else:
+            data=resp.json()
+            outcome='accepted' if isinstance(data,dict) and data.get('events_received',0)>=1 else 'error'
+            if outcome=='error':error_code='no_events_received'
     except Exception:  # noqa: BLE001
-        logger.exception("Meta CAPI %s error (event_id=%s)", event_name, event_id)
+        error_code='transport_or_response_error'
+        logger.warning('Meta CAPI %s could not confirm delivery',event_name)
+    await record('capi',event_name,event_id,outcome,error_code=error_code)

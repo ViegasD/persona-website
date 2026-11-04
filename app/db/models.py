@@ -30,6 +30,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     func,
+    text as sql_text,
 )
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
@@ -469,6 +470,91 @@ class OutboxJob(Base):
     delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_error: Mapped[str | None] = mapped_column(String(255))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+
+class ActivityEvent(Base):
+    __tablename__ = 'activity_event'
+    __table_args__ = (UniqueConstraint('source','event_id','event_name',name='uq_activity_event'),
+                     Index('ix_activity_event_created_at','created_at'))
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    source: Mapped[str] = mapped_column(String(16), nullable=False)
+    event_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    event_name: Mapped[str] = mapped_column(String(40), nullable=False)
+    session_id: Mapped[str | None] = mapped_column(String(36))
+    user_id: Mapped[int | None] = mapped_column(ForeignKey(f'{SCHEMA}.user.id'))
+    order_id: Mapped[int | None] = mapped_column(ForeignKey(f'{SCHEMA}.order.id'))
+    page: Mapped[str | None] = mapped_column(String(64))
+    status: Mapped[str] = mapped_column(String(24), nullable=False)
+    error_code: Mapped[str | None] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class VideoRevision(Base):
+    __tablename__ = "video_revision"
+    __table_args__ = (
+        UniqueConstraint("request_key", name="uq_revision_request"),
+        Index("uq_active_video_revision", "item_id", unique=True,
+              postgresql_where=sql_text("status IN ('QUEUED','GENERATING','READY','CHECK_REQUIRED')")),
+    )
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    item_id: Mapped[int] = mapped_column(ForeignKey(f"{SCHEMA}.order_item.id"), index=True)
+    request_key: Mapped[str] = mapped_column(String(36), nullable=False)
+    status: Mapped[str] = mapped_column(String(24), default="QUEUED", nullable=False)
+    voice: Mapped[str] = mapped_column(String(16), default="catalog", nullable=False)
+    old_video_key: Mapped[str | None] = mapped_column(String(512))
+    reuse_scene: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    scene_key: Mapped[str | None] = mapped_column(String(512))
+    video_key: Mapped[str | None] = mapped_column(String(512))
+    thumbnail_key: Mapped[str | None] = mapped_column(String(512))
+    prompt: Mapped[str | None] = mapped_column(Text)
+    image_request_id: Mapped[str | None] = mapped_column(String(128))
+    image_provider: Mapped[str | None] = mapped_column(String(16))
+    video_request_id: Mapped[str | None] = mapped_column(String(128))
+    phase: Mapped[str | None] = mapped_column(String(32))
+    duration: Mapped[int | None] = mapped_column(Integer)
+    model: Mapped[str | None] = mapped_column(String(128))
+    error: Mapped[str | None] = mapped_column(String(500))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class VideoEngagement(Base):
+    __tablename__ = "video_engagement"
+    __table_args__ = (CheckConstraint("score BETWEEN 1 AND 5", name="ck_video_rating"),)
+    item_id: Mapped[int] = mapped_column(ForeignKey(f"{SCHEMA}.order_item.id"), primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey(f"{SCHEMA}.user.id"), primary_key=True)
+    version: Mapped[str] = mapped_column(String(64), primary_key=True)
+    viewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    downloaded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    score: Mapped[int | None] = mapped_column(Integer)
+    comment: Mapped[str | None] = mapped_column(String(1000))
+    rated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class OperationsSettings(Base):
+    __tablename__ = "operations_settings"
+    __table_args__ = (CheckConstraint("id = 1", name="single_operations_settings"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    revision: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    staff_email: Mapped[str] = mapped_column(String(255), default="eduardolv100@gmail.com", nullable=False)
+    alerts_enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+
+
+class ProviderAccount(Base):
+    __tablename__ = "provider_account"
+    provider: Mapped[str] = mapped_column(String(16), primary_key=True)
+    threshold: Mapped[Decimal] = mapped_column(Numeric(18,6), nullable=False)
+    manual_balance: Mapped[Decimal | None] = mapped_column(Numeric(18,6))
+    manual_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    balance: Mapped[Decimal | None] = mapped_column(Numeric(18,6))
+    checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_success_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    quota_exhausted: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    error: Mapped[str | None] = mapped_column(String(200))
+    alert_episode: Mapped[str | None] = mapped_column(String(36))
+    last_alert_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class Delivery(Base):

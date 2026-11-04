@@ -28,6 +28,8 @@ async def record_openai_usage(usage,model):
                     'input_tokens':usage.prompt_tokens,'output_tokens':usage.completion_tokens}))
     except Exception:
         logger.warning('Could not record OpenAI usage; financial coverage is incomplete')
+    from app.services.provider_monitor import report_success
+    await report_success('openai')
 
 
 async def reconcile_xai_usage(request_id,result):

@@ -30,13 +30,13 @@ async def record_delivery_job(session: AsyncSession, order: Order) -> None:
 
 
 async def deliver_outbox_job(session: AsyncSession, job: OutboxJob) -> None:
-    if job.kind != "account_email":
+    if job.kind not in {"account_email", "operational_email"}:
         if not processing_enabled():
             return
         order = await session.get(Order, job.order_id)
         if order is None or not processing_allowed(order):
             return
-    if job.kind == "account_email":
+    if job.kind in {"account_email", "operational_email"}:
         await send_account_email(job.payload)
         job.payload = {}  # Remove the raw email link after successful delivery.
     elif job.kind == "deliver_order":
@@ -44,6 +44,9 @@ async def deliver_outbox_job(session: AsyncSession, job: OutboxJob) -> None:
         records = await deliver_order(session, job.order_id)
         if not records:
             raise RuntimeError("order is not ready for website delivery")
+    elif job.kind == "regenerate_video":
+        pool = await get_pool()
+        await pool.enqueue_job('generate_video_revision', job.payload['revision_id'], _job_id=f'outbox:{job.id}')
     elif job.kind in {"process_item", "generate_video"}:
         item = (await session.execute(select(OrderItem).join(Order).where(
             OrderItem.id == job.payload["item_id"],
@@ -74,18 +77,32 @@ def active_account_mail(now: datetime):
 async def dispatch_outbox(ctx: dict | None = None) -> None:
     eligible = false()
     if processing_enabled():
-        eligible = and_(OutboxJob.kind.in_(["process_item", "generate_video", "deliver_order"]),
+        eligible = and_(OutboxJob.kind.in_(["process_item", "generate_video", "deliver_order", "regenerate_video"]),
                         select(Order.id).where(Order.id == OutboxJob.order_id,
                             Order.created_at >= get_settings().processing_start_at).exists())
     for _ in range(50):
         async with session_scope() as session:
             job = (await session.execute(select(OutboxJob).where(
                 OutboxJob.delivered_at.is_(None), OutboxJob.available_at <= datetime.now(UTC),
-                or_(active_account_mail(datetime.now(UTC)), eligible),
+                or_(active_account_mail(datetime.now(UTC)), and_(OutboxJob.kind == 'operational_email', OutboxJob.attempts == 0), eligible),
             ).order_by(OutboxJob.id).limit(1).with_for_update(skip_locked=True))).scalar_one_or_none()
             if job is None:
                 break
             job.attempts += 1
+            if job.kind == 'operational_email':
+                # Commit intent before SMTP; an ambiguous result is held for staff, not resent automatically.
+                payload = dict(job.payload)
+                job.available_at = datetime.now(UTC) + timedelta(days=365)
+                job.last_error = 'SubmissionInProgress'
+                await session.commit()
+                try:
+                    await send_account_email(payload)
+                except Exception as exc:
+                    job.last_error = type(exc).__name__
+                else:
+                    job.delivered_at = datetime.now(UTC); job.last_error = None; job.payload = {}
+                await session.commit()
+                continue
             try:
                 await deliver_outbox_job(session, job)
             except Exception as exc:

@@ -6,6 +6,8 @@ from fastapi import APIRouter
 
 from app.api.v1 import admin, admin_finance, affiliates, auth, catalog, chat, config, credits, dev, media, orders, payments
 from app.core.settings import get_settings
+from app.api.v1 import engagement,admin_operations
+from app.api.v1 import activity
 
 router = APIRouter(prefix="/api/v1")
 router.include_router(catalog.router)
@@ -14,6 +16,9 @@ router.include_router(auth.router)
 router.include_router(payments.router)
 router.include_router(admin.router)
 router.include_router(admin_finance.router)
+router.include_router(admin_operations.router)
+router.include_router(engagement.router)
+router.include_router(activity.router)
 router.include_router(affiliates.router)
 router.include_router(chat.router)
 router.include_router(media.router)

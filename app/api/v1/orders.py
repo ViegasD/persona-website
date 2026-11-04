@@ -117,6 +117,7 @@ def _to_out(order: Order, *, guest_token: str | None = None) -> OrderOut:
 
 
 def _item_to_out(item: OrderItem, *, delivered: bool = True) -> OrderItemOut:
+    from app.services.engagement import video_version
     settings = get_settings()
     api_base = settings.api_base_url.rstrip("/")
     video_url = None
@@ -134,6 +135,7 @@ def _item_to_out(item: OrderItem, *, delivered: bool = True) -> OrderItemOut:
         status=item.status,
         video_url=video_url,
         thumbnail_url=thumb_url,
+        video_version=video_version(item) if video_url else None,
     )
 
 

@@ -17,6 +17,8 @@ from app.core.security import (
 )
 from app.core.settings import get_settings
 from app.db.models import Order, User
+from app.db.models import ActivityEvent
+from uuid import uuid4
 from app.db.session import get_session
 from app.schemas.v1 import (
     AccountEmailIn,
@@ -92,6 +94,7 @@ async def register(payload: RegisterIn, session: AsyncSession = Depends(get_sess
         await session.rollback()
         raise HTTPException(status.HTTP_409_CONFLICT, detail="email already registered") from exc
     await issue_account_token(session, user, "verify")
+    session.add(ActivityEvent(source='server',event_name='AccountCreated',event_id=str(uuid4()),status='confirmed',user_id=user.id))
     await session.commit()
     return TokenOut(access_token=create_user_token(user.id, user.token_version), user_id=user.id)
 
@@ -103,6 +106,8 @@ async def login(payload: LoginIn, session: AsyncSession = Depends(get_session)) 
     ).scalar_one_or_none()
     if user is None or not user.password_hash or not verify_password(payload.password, user.password_hash):
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="invalid credentials")
+    session.add(ActivityEvent(source='server',event_name='Login',event_id=str(uuid4()),status='confirmed',user_id=user.id))
+    await session.commit()
     return TokenOut(access_token=create_user_token(user.id, user.token_version), user_id=user.id)
 
 
@@ -129,6 +134,7 @@ async def me(
 @router.post("/verify-email", response_model=TokenOut)
 async def verify_email(payload: AccountTokenIn, session: AsyncSession = Depends(get_session)) -> TokenOut:
     user = await verify_account(session, payload.token)
+    session.add(ActivityEvent(source='server',event_name='EmailVerified',event_id=str(uuid4()),status='confirmed',user_id=user.id))
     await session.commit()
     return TokenOut(access_token=create_user_token(user.id, user.token_version), user_id=user.id)
 

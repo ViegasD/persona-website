@@ -39,6 +39,7 @@ async def create_composite_task(
     image_urls: list[str],
     image_size: str = "9:16",
     output_format: str = "PNG",
+    submission_attempts: int | None = None,
 ) -> str:
     """Submit a nano-banana-pro composite task and return ``taskId``."""
     s = get_settings()
@@ -56,11 +57,15 @@ async def create_composite_task(
         body["callBackUrl"] = s.kie_callback_url
 
     last_exc: Exception | None = None
-    for attempt in range(_MAX_RETRIES):
+    attempts = submission_attempts or _MAX_RETRIES
+    for attempt in range(attempts):
         async with httpx.AsyncClient(timeout=60) as client:
             resp = await client.post(url, json=body, headers=_headers())
+        text = resp.text.lower()
+        if ('credit' in text and any(word in text for word in ('insufficient','not enough','exhausted'))) or 'insufficient balance' in text:
+            raise KieError('kie credit_balance_exhausted')
         if resp.status_code not in _RETRY_STATUSES:
-            resp.raise_for_status()
+            if resp.status_code >= 400:raise KieError(f'kie createTask HTTP {resp.status_code}')
             break
         from loguru import logger
         delay = _RETRY_BASE_DELAY * (2 ** attempt)
@@ -69,6 +74,7 @@ async def create_composite_task(
             status=resp.status_code, attempt=attempt + 1, max=_MAX_RETRIES, delay=delay,
         )
         last_exc = KieError(f"kie createTask HTTP {resp.status_code}: {resp.text}")
+        if attempt == attempts-1:raise last_exc
         await asyncio.sleep(delay)
     else:
         raise last_exc  # type: ignore[misc]

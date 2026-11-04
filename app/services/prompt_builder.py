@@ -1,17 +1,4 @@
-"""Builds the Grok Imagine Video prompt.
-
-The text follows the **strict template** that the user proved works well:
-locked camera, locked body/hand pose, only lip-sync + blink + micro head
-movement, one character speaks at a time, final group line that starts
-before the last 2 s. We keep every constraint identical and only inject:
-
-* a short scene description,
-* per-character speaker lines (with positional ordinal),
-* the final group line.
-
-The structure was tuned to remove degrees of freedom from the model — do
-**not** loosen any of these constraints when changing this file.
-"""
+"""Reference-preserving cameos with paced dialogue and controlled performance."""
 
 from __future__ import annotations
 
@@ -58,6 +45,7 @@ class VideoPromptInputs:
     characters: list[CharacterLine]
     group_line_pt: str
     duration_seconds: int = 10
+    action_direction: str = ''
 
 
 def _build_shared_header(scene_description: str) -> list[str]:
@@ -78,9 +66,8 @@ def _build_shared_header(scene_description: str) -> list[str]:
     )
     parts.append("")
     parts.append(
-        "IMPORTANT: The character must remain in the exact same position and orientation as the "
-        "reference image; preserve its existing viewing angle, no rotation, "
-        "no change in body position."
+        "IMPORTANT: Keep the character anchored in the reference composition; preserve existing viewing angles and anatomy. "
+        "Allow small natural head nods and safe gestures without walking, turning away, changing outfits or changing the scene."
     )
     parts.append("")
     parts.append(
@@ -110,10 +97,12 @@ def _build_single_character_prompt(inputs: VideoPromptInputs) -> str:
     parts.append(speech)
     parts.append("")
     parts.append(
-        f"Timing guidance: all speech must finish before the last 2 seconds to avoid being cut off."
+        f"Timing guidance: begin speaking within the first 0.7 seconds. Spread the dialogue naturally across the shot, finishing around {max(1,inputs.duration_seconds-1.5):g}s. "
+        "Do not rush every line into the first half and then freeze. Do not stretch or repeat syllables to fill time."
     )
     parts.append("")
-    parts.append("Animation: lip sync, blinking and subtle facial expression only. Keep body, hands, clothing and background still.")
+    parts.append('Performance: '+(inputs.action_direction or 'Warm eye contact, small conversational nods and expressive facial reactions, followed by a gentle closing smile.'))
+    parts.append('Keep props supported, faces and outfits unchanged, and all lettering stable. No invented fingers, added limbs, prop teleportation or long frozen tail. No new dialogue beyond the supplied lines.')
     parts.append(
         "Audio: clear Brazilian Portuguese, natural voice matching the character, accurate lip sync"
     )
@@ -129,15 +118,15 @@ def _build_multi_character_prompt(inputs: VideoPromptInputs) -> str:
     parts = _build_shared_header(inputs.scene_description)
     # Override the "character" wording to plural
     parts[4] = (
-        "IMPORTANT: All characters must remain in the exact same positions and orientation as the "
-        "reference image; preserve their existing viewing angles, no rotation, "
-        "no change in body position."
+        "IMPORTANT: All characters remain in their reference positions with existing viewing angles and unchanged anatomy. "
+        "Allow small head nods and gentle reactions without swapping positions, walking or turning away."
     )
 
     parts.append(
         f"The video is a continuous {inputs.duration_seconds}-second shot. "
-        "Only one character speaks at a time, while the others remain still with subtle idle "
-        "animation (blinking only)."
+        "Only one character speaks at a time; the others listen with gentle facial reactions and small nods. "
+        "Begin speech within 0.7s and distribute turns across the shot, finishing around "
+        f"{max(1,inputs.duration_seconds-1.5):g}s. Avoid rushing the entire dialogue into the first half."
     )
     parts.append("")
     parts.append("Scene progression (no camera movement, only speaking turns):")
@@ -147,24 +136,24 @@ def _build_multi_character_prompt(inputs: VideoPromptInputs) -> str:
         ordinal = "First" if idx == 0 else "Then"
         descriptor = f" ({char.descriptor})" if char.descriptor else ""
         parts.append(
-            f"{ordinal}, the {label} character{descriptor} speaks, maintaining the same pose, "
-            "only moving lips and slight facial expression."
+            f"{ordinal}, the {label} character{descriptor} speaks with accurate lip sync, warm eye contact and small conversational nods."
         )
         if char.voice_direction:
             parts.append(f"Voice for the {label} speaker (not spoken dialogue): {char.voice_direction}")
         parts.append("They say in Brazilian Portuguese:")
         parts.append(char.line_pt.strip())
         parts.append("")
-        parts.append("Then the character becomes still.")
+        parts.append("Then the character listens with a gentle facial reaction while the next speaker begins.")
         parts.append("")
 
     # ── Final group line ──────────────────────────────────────────────
     if not inputs.group_line_pt.strip():
-        parts.append("All speech must finish before the last 2 seconds. Animate only lips, blinking and subtle facial expressions. Keep bodies, hands and background still.")
+        parts.append('Performance: '+(inputs.action_direction or 'Small natural nods, attentive expressions and a warm closing smile.'))
+        parts.append('Keep all props supported, outfits, faces and lettering stable. No added fingers, prop teleportation, repeated dialogue or long frozen tail.')
         parts.append("Audio: clear Brazilian Portuguese, natural voices matching the characters, accurate lip sync, no overlap.")
         return "\n".join(parts).strip()
     parts.append(
-        "Final moment: all characters speak together, still in the exact same pose, "
+        "Final moment: all characters speak together, remaining anchored in their reference positions, "
         "synchronized lip movement and natural facial expression."
     )
     parts.append("This final line must start early enough to finish before the video ends.")
@@ -175,7 +164,8 @@ def _build_multi_character_prompt(inputs: VideoPromptInputs) -> str:
         "Timing guidance: the final group line must begin before the last 2 seconds to avoid being cut off."
     )
     parts.append("")
-    parts.append("Animation: lip sync, blinking and subtle facial expression only. Keep bodies, hands, clothing and background still.")
+    parts.append('Performance: '+(inputs.action_direction or 'Natural small head nods, warm expressions and a gentle closing smile.'))
+    parts.append('Keep props supported, anatomy, outfits, faces and lettering stable; no long frozen tail.')
     parts.append(
         "Audio: clear Brazilian Portuguese, natural voices matching the characters, accurate lip sync, no overlap except final line"
     )

@@ -118,3 +118,14 @@ def verify_media_preview_token(token: str, max_age_seconds: int = 3600) -> int |
         return int(serializer.loads(token, max_age=max_age_seconds)["item_id"])
     except (BadSignature, KeyError, ValueError):
         return None
+
+
+def sign_revision_token(revision_id: int) -> str:
+    return URLSafeTimedSerializer(get_settings().guest_cookie_secret, salt='admin-video-revision').dumps({'id': revision_id})
+
+
+def verify_revision_token(token: str) -> int | None:
+    try:
+        return int(URLSafeTimedSerializer(get_settings().guest_cookie_secret, salt='admin-video-revision').loads(token, max_age=3600)['id'])
+    except (BadSignature, KeyError, ValueError):
+        return None
