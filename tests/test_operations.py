@@ -207,7 +207,7 @@ async def test_browser_activity_is_origin_checked_and_cannot_confirm_payment(dat
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('fail',[False,True])
+@pytest.mark.parametrize('fail',[False,True,'anatomy'])
 async def test_revision_worker_stages_or_records_quota_failure_without_replacing_live_video(database,monkeypatch,fail):
     from app.workers import batch_runner
     from app.db.session import session_scope
@@ -229,13 +229,15 @@ async def test_revision_worker_stages_or_records_quota_failure_without_replacing
     monkeypatch.setattr(video_revisions.storage,'get_image_as_data_url',lambda *a,**kw:'data:image/png;base64,test')
     monkeypatch.setattr(video_revisions.storage,'upload_bytes',Mock())
     monkeypatch.setattr(video_revisions.scene_builder,'review_scene',AsyncMock(return_value={}))
+    from app.services.video_quality import VideoQualityError
+    monkeypatch.setattr(video_revisions,'review_video',AsyncMock(side_effect=VideoQualityError({'issues':['two tails']}) if fail=='anatomy' else None,return_value={'anatomy_consistent':True}))
     def thumbnail(command,**kwargs):
         from pathlib import Path
         Path(command[-1]).write_bytes(b'jpeg')
     monkeypatch.setattr(video_revisions.subprocess,'run',thumbnail)
     async def generate(**kwargs):
         assert kwargs['voice_override']=='male' and kwargs['revision_id']==rid
-        if fail:
+        if fail is True:
             await video_revisions.update(rid,phase='video_submitting')
             raise XaiError('xAI HTTP 402 (credit_balance_exhausted)')
         await video_revisions.update(rid,video_key='private-draft.mp4',phase='video_stored')
@@ -243,10 +245,10 @@ async def test_revision_worker_stages_or_records_quota_failure_without_replacing
     await video_revisions.generate_video_revision({},rid)
     async with database() as s:
         row=await s.get(VideoRevision,rid)
-        assert row.status==('FAILED' if fail else 'READY')
+        assert row.status==('CHECK_REQUIRED' if fail=='anatomy' else 'FAILED' if fail else 'READY')
         assert (await s.get(OrderItem,iid)).video_s3_key==original
         assert (await s.get(Order,oid)).status==OrderStatus.DELIVERED
-        if fail:assert (await s.get(ProviderAccount,'xai')).quota_exhausted
+        if fail is True:assert (await s.get(ProviderAccount,'xai')).quota_exhausted
 
 
 @pytest.mark.asyncio

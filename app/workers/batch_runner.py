@@ -55,6 +55,7 @@ from app.services.worker_recovery import recover_interrupted_jobs
 from app.services.generation_config import read_generation_config
 from app.services.cost_tracking import tracked, reconcile_xai_usage
 from app.services.provider_monitor import report_error, report_success, check_provider_balances
+from app.services.video_quality import review_video, VideoQualityError
 from app.workers.queue import redis_settings
 
 # ─────────────────────────── helpers ──────────────────────────────────────
@@ -781,10 +782,19 @@ async def _generate_and_store_video(
             item.comfy_workflow_b_prompt_id = request_id  # repurposed: xAI request id
             item.resolved_script = prompt_text
             item.video_s3_key = video_key
-        if queue_phase2 and revision_id is None:
-            order = await session.get(Order, item.order_id)
-            await record_video_jobs(session, order, [item_id], kind="generate_video", generation=phase2_generation)
         await session.commit()
+
+    if revision_id is None:
+        try:
+            verdict=await review_video(raw,input_image_url)
+        except VideoQualityError as error:
+            storage.upload_bytes(video_key+'.quality.json',json.dumps(error.verdict).encode(),'application/json')
+            raise
+        storage.upload_bytes(video_key+'.quality.json',json.dumps(verdict).encode(),'application/json')
+        if queue_phase2:
+            async with session_scope() as session:
+                order = await session.get(Order, order_id)
+                await record_video_jobs(session, order, [item_id], kind="generate_video", generation=phase2_generation)
 
 
 # ─────────────────────────── arq settings ─────────────────────────────────

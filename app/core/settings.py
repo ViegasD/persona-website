@@ -49,6 +49,7 @@ class Settings(BaseSettings):
     # --- OpenAI (script writer; mirrors Node backend) ---
     openai_api_key: str = Field(..., alias="OPENAI_API_KEY")
     openai_model: str = Field("gpt-4o-mini", alias="OPENAI_MODEL")
+    quality_review_model: str = Field('gpt-6.1-terra', alias='QUALITY_REVIEW_MODEL')
 
     # --- kie.ai (Nano Banana Pro composite) ---
     kie_api_key: str | None = Field(None, alias="KIE_API_KEY")

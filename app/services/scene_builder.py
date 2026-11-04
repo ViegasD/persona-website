@@ -9,7 +9,7 @@ from openai import AsyncOpenAI
 from app.core.settings import get_settings
 from app.services.cost_tracking import record_openai_usage
 
-SCENE_VERSION = "occasion-scene-v6-personalized"
+SCENE_VERSION = "occasion-scene-v7-anatomy-reviewed"
 
 # Curated visual instructions, never raw customer text or prompt instructions.
 SETTINGS = {
@@ -157,6 +157,8 @@ def scene_prompt(names: list[str], occasion: str | None, *, context: dict | None
         f"Create a finished vertical 9:16 cameo scene for {len(names)} character(s). "
         f"Use the supplied character images as strict identity references. Cast, left to right: {', '.join(names)}. "
         "Preserve the exact original faces, species, age, hair, clothing, colors, proportions and individual art styles. "
+        "Make every visible appendage anatomically unambiguous: preserve the character's correct number of arms, legs, ears and tails. "
+        "A single-tailed character has exactly ONE clearly connected tail, separate from its legs. Never turn a lifted foot into another tail. "
         "Do not substitute a generic lookalike or redesign the character. No extra people or characters. "
         f"Place them naturally in {setting}. "
         "Build one coherent, thoughtfully decorated scene with foreground, middle ground and background depth; "
@@ -183,10 +185,13 @@ async def review_scene(reference_urls: list[str], scene_url: str, *, context: di
     settings = get_settings()
     content = [{"type": "text", "text": (
         "Compare the original character references (all images except the last) with the final scene (last image). "
-        "Return JSON booleans identity_preserved, full_background, prominent_subjects, and a short reason. "
+        "Return JSON booleans identity_preserved, full_background, prominent_subjects, anatomy_correct, and a short reason. "
         "identity_preserved: every requested character keeps its face, species, colors, outfit and art style, with no extra character. "
         "full_background: a real, coherent setting fills ALL edges, with no blank white bands, checkerboard, collage or letterboxing. "
         "prominent_subjects: characters occupy a substantial part of the frame and faces are readable, not tiny figures. "
+        "anatomy_correct: count the visible arms, legs, ears and tails for EACH character, compare their anatomy with the reference, "
+        "and reject any extra, duplicated, fused or ambiguously connected appendage. A single-tailed animal must not have a second tail. "
+        "Expressive poses and natural occlusion are allowed; judge appendage count and attachment, not whether the pose is neutral. "
         "Be strict. An attractive but different character fails."
     )}]
     if context:
@@ -198,14 +203,14 @@ async def review_scene(reference_urls: list[str], scene_url: str, *, context: di
     name=display_name(recipient_name) if context and context.get('kind')=='birthday' else ''
     if name:
         content[0]['text'] += f' Also return name_exact_and_legible: the only lettering is exactly {json.dumps(name,ensure_ascii=False)}, clearly spelled with correct accents on a birthday pennant. Check all visible hands and cake support: malformed hands or impossible grip fail identity_preserved.'
-    content += [{"type": "image_url", "image_url": {"url": url, "detail": "high" if name and index==len(reference_urls) else "low"}} for index,url in enumerate([*reference_urls, scene_url])]
+    content += [{"type": "image_url", "image_url": {"url": url, "detail": "high"}} for url in [*reference_urls, scene_url]]
     result = await AsyncOpenAI(api_key=settings.openai_api_key).chat.completions.create(
         model=settings.openai_model, messages=[{"role": "user", "content": content}],
         response_format={"type": "json_object"}, max_completion_tokens=500,
     )
     await record_openai_usage(getattr(result,'usage',None),settings.openai_model)
     verdict = json.loads(result.choices[0].message.content or "{}")
-    required = ["identity_preserved", "full_background", "prominent_subjects"]
+    required = ["identity_preserved", "full_background", "prominent_subjects", "anatomy_correct"]
     if context:
         required.append("occasion_appropriate")
     if name:required.append('name_exact_and_legible')

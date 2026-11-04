@@ -21,3 +21,11 @@ Os vídeos da conta registram reprodução iniciada após cerca de três segundo
 O vídeo continua em `grok-imagine-video` com duração configurada de 15 segundos; não há migração automática para Video 1.5. O roteiro gerado procura 22–26 palavras em 15s; texto exato curto do cliente é preservado. A cena de aniversário pode incluir bolo e um pendão com até os dois primeiros nomes. A revisão exige identidade, fundo, ocasião e grafia legível antes do vídeo; falhas exigem intervenção, sem repetição paga automática. Gestos são pequenos, com câmera fixa e objetos apoiados. Uma imagem e um vídeo continuam sendo o fluxo normal.
 
 Contratos e preços de referência: [edição multi-imagem xAI](https://docs.x.ai/developers/model-capabilities/images/multi-image-editing), [Grok Imagine Image 2.0](https://docs.x.ai/developers/models/grok-imagine-image-2.0), [saldo KIE](https://docs.kie.ai/common-api/get-account-credits).
+
+## Anatomia e referências
+
+Poses expressivas continuam permitidas. Use referências de catálogo com anatomia clara: cauda e patas distinguíveis, sem membros sobrepostos que pareçam duplicados. Troque a imagem de referência quando ela for ambígua; o prompt não é um substituto para essa correção.
+
+A revisão de cenas exige anatomia correta. Antes da disponibilização automática, uma revisão independente observa seis quadros distribuídos pelo vídeo, buscando membros, orelhas ou caudas duplicados e alterações de identidade. `QUALITY_REVIEW_MODEL` escolhe o modelo dessa revisão (padrão `gpt-6.1-terra`); o consumo é registrado. Configure seu preço por tokens em Financeiro quando necessário. Vereditos ficam no armazenamento privado ao lado do vídeo (`.quality.json`).
+
+Falhas e casos incertos ficam retidos para revisão; não provocam outra geração paga automaticamente. As prévias de tentativas com falha continuam disponíveis ao administrador. Esta revisão é probabilística e pode deixar passar defeitos entre quadros amostrados; não garante anatomia perfeita. As versões em rascunho também passam pela revisão antes de ficarem prontas para publicação.

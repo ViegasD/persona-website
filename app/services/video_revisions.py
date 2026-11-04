@@ -17,6 +17,7 @@ from app.services.generation_config import read_generation_config
 from app.services.cost_tracking import item_context,reconcile_xai_usage
 from app.services.outbox import record_delivery_job
 from app.services.provider_monitor import report_error
+from app.services.video_quality import review_video,VideoQualityError
 
 ACTIVE={'QUEUED','GENERATING','READY','CHECK_REQUIRED'}
 
@@ -113,8 +114,16 @@ async def generate_video_revision(ctx,revision_id):
             video_key=storage.storefront_key('revisions',str(revision_id),uuid4().hex+'.mp4');storage.upload_bytes(video_key,data,'video/mp4')
             await update(revision_id,video_key=video_key,phase='video_stored')
         async with session_scope() as session:revision=await session.get(VideoRevision,revision_id);video_key=revision.video_key
+        await update(revision_id,phase='video_review')
+        raw=storage.download_bytes(video_key)
+        try:verdict=await review_video(raw,storage.get_image_as_data_url(scene_key))
+        except VideoQualityError as error:
+            import json
+            storage.upload_bytes(video_key+'.quality.json',json.dumps(error.verdict).encode(),'application/json');raise
+        import json
+        storage.upload_bytes(video_key+'.quality.json',json.dumps(verdict).encode(),'application/json')
         with TemporaryDirectory() as directory:
-            path=Path(directory)/'video.mp4';path.write_bytes(storage.download_bytes(video_key));thumbnail=Path(directory)/'frame.jpg'
+            path=Path(directory)/'video.mp4';path.write_bytes(raw);thumbnail=Path(directory)/'frame.jpg'
             subprocess.run(['ffmpeg','-v','error','-ss','1','-i',str(path),'-frames:v','1','-y',str(thumbnail)],capture_output=True,check=True,timeout=120)
             key=storage.storefront_key('revisions',str(revision_id),'thumbnail-'+uuid4().hex+'.jpg');storage.upload_bytes(key,thumbnail.read_bytes(),'image/jpeg')
         await update(revision_id,thumbnail_key=key,status='READY',phase='review',error=None)

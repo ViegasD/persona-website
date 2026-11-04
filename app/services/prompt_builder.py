@@ -64,6 +64,11 @@ def _build_shared_header(scene_description: str) -> list[str]:
         "IDENTICAL to the reference image throughout the entire video. "
         "Any deviation from the reference image is not acceptable."
     )
+    parts.append(
+        "ANATOMY LOCK: preserve the exact number and attachment points of arms, legs, ears and tails throughout every frame. "
+        "For a single-tailed character, show only ONE tail: never duplicate, split, mirror or move it to the other hip. "
+        "Allow expressive poses and natural gestures while keeping the anatomy coherent."
+    )
     parts.append("")
     parts.append(
         "IMPORTANT: Keep the character anchored in the reference composition; preserve existing viewing angles and anatomy. "
@@ -117,7 +122,7 @@ def _build_multi_character_prompt(inputs: VideoPromptInputs) -> str:
 
     parts = _build_shared_header(inputs.scene_description)
     # Override the "character" wording to plural
-    parts[4] = (
+    parts[5] = (
         "IMPORTANT: All characters remain in their reference positions with existing viewing angles and unchanged anatomy. "
         "Allow small head nods and gentle reactions without swapping positions, walking or turning away."
     )
