@@ -56,9 +56,13 @@ async def generate_structured_script(*, characters: list[CharacterSpec], recipie
     budget = speech_word_budget(duration_seconds)
     minimum = speech_minimum(duration_seconds)
     exact = (user_message or '').startswith('[Texto exato]')
-    if exact and n==1:
-        script=StructuredScript([(user_message or '').removeprefix('[Texto exato]').strip()], '')
-        if not script.character_lines[0] or not script_fits(script,duration_seconds):raise ValueError('Exact dialogue exceeds the configured duration or is empty')
+    if exact:
+        words=(user_message or '').removeprefix('[Texto exato]').strip().split()
+        if len(words)<n or len(words)>budget:
+            raise ValueError(f'Exact dialogue has {len(words)} words; this video allows {budget}. Shorten it before retrying.')
+        # Preserve every word and its language; distribute consecutive turns without rewriting.
+        lines=[' '.join(words[(i*len(words))//n:((i+1)*len(words))//n]) for i in range(n)]
+        script=StructuredScript(lines, '')
         return script
     messages = [
         {"role": "system", "content": (
@@ -67,6 +71,7 @@ async def generate_structured_script(*, characters: list[CharacterSpec], recipie
             f"Vídeo de {duration_seconds} segundos: no MÁXIMO {budget} palavras SOMANDO todas as falas. "
             f"Use entre {minimum} e {budget} palavras no total, preenchendo o tempo com fala natural e significativa. "
             f"Responda JSON com character_lines (lista de exatamente {n} falas curtas não vazias) e group_line. "
+            f"Divida o orçamento entre os personagens: aproximadamente {max(1,budget//n)} palavras POR personagem, não {budget} por personagem. "
             "Para um personagem, group_line deve ser vazia. Para vários, pode ser vazia ou uma despedida curta. "
             "Cumprimente a criança pelo nome, mantenha o sentido da mensagem e a ocasião, "
             "Crie uma pequena progressão: saudação pessoal, desejo ou incentivo específico e despedida carinhosa; evite repetir frases genéricas ou só dizer parabéns. "
@@ -90,7 +95,9 @@ async def generate_structured_script(*, characters: list[CharacterSpec], recipie
                 words=sum(len(line.split()) for line in [*script.character_lines,script.group_line])
                 if script_fits(script, duration_seconds) and (words>=minimum or exact):
                     return script
-            messages.append({"role": "user", "content": f"Refaça: {n} falas, entre {minimum} e {budget} palavras no total. Se ficou curto, desenvolva uma ideia carinhosa ligada à ocasião. Se excedeu, encurte com frases completas."})
+            messages.append({"role":"assistant","content":json.dumps(payload,ensure_ascii=False)})
+            actual=sum(len(line.split()) for line in [*(lines if isinstance(lines,list) else []),group] if isinstance(line,str))
+            messages.append({"role": "user", "content": f"A resposta anterior tem {actual} palavras. Refaça: exatamente {n} falas, entre {minimum} e {budget} palavras SOMANDO todas as falas, group_line vazia. Use aproximadamente {max(1,budget//n)} palavras por personagem. Se excedeu, remova ideias secundárias e encurte com frases completas; não repita a resposta anterior."})
         except (ValueError, TypeError, KeyError):
             continue
     raise RuntimeError("Could not produce dialogue within the configured video duration")

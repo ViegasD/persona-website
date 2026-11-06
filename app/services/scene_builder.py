@@ -9,7 +9,7 @@ from openai import AsyncOpenAI
 from app.core.settings import get_settings
 from app.services.cost_tracking import record_openai_usage
 
-SCENE_VERSION = "occasion-scene-v7-anatomy-reviewed"
+SCENE_VERSION = "occasion-scene-v8-style-preserved"
 
 # Curated visual instructions, never raw customer text or prompt instructions.
 SETTINGS = {
@@ -157,6 +157,8 @@ def scene_prompt(names: list[str], occasion: str | None, *, context: dict | None
         f"Create a finished vertical 9:16 cameo scene for {len(names)} character(s). "
         f"Use the supplied character images as strict identity references. Cast, left to right: {', '.join(names)}. "
         "Preserve the exact original faces, species, age, hair, clothing, colors, proportions and individual art styles. "
+        "For flat 2D references, preserve flat solid colors and the original linework: no 3D extrusion, sculpted eyebrows, glossy plastic, plush texture or realistic fur. "
+        "Adapt the scenery to the characters' art style instead of restyling the characters to match the scenery. "
         "Make every visible appendage anatomically unambiguous: preserve the character's correct number of arms, legs, ears and tails. "
         "A single-tailed character has exactly ONE clearly connected tail, separate from its legs. Never turn a lifted foot into another tail. "
         "Do not substitute a generic lookalike or redesign the character. No extra people or characters. "
@@ -204,11 +206,12 @@ async def review_scene(reference_urls: list[str], scene_url: str, *, context: di
     if name:
         content[0]['text'] += f' Also return name_exact_and_legible: the only lettering is exactly {json.dumps(name,ensure_ascii=False)}, clearly spelled with correct accents on a birthday pennant. Check all visible hands and cake support: malformed hands or impossible grip fail identity_preserved.'
     content += [{"type": "image_url", "image_url": {"url": url, "detail": "high"}} for url in [*reference_urls, scene_url]]
+    extra={'reasoning_effort':'none'} if settings.quality_review_model.startswith('gpt-6.1-terra') else {}
     result = await AsyncOpenAI(api_key=settings.openai_api_key).chat.completions.create(
-        model=settings.openai_model, messages=[{"role": "user", "content": content}],
-        response_format={"type": "json_object"}, max_completion_tokens=500,
+        model=settings.quality_review_model, messages=[{"role": "user", "content": content}],
+        response_format={"type": "json_object"}, max_completion_tokens=800, **extra,
     )
-    await record_openai_usage(getattr(result,'usage',None),settings.openai_model)
+    await record_openai_usage(getattr(result,'usage',None),settings.quality_review_model)
     verdict = json.loads(result.choices[0].message.content or "{}")
     required = ["identity_preserved", "full_background", "prominent_subjects", "anatomy_correct"]
     if context:

@@ -29,3 +29,8 @@ Poses expressivas continuam permitidas. Use referências de catálogo com anatom
 A revisão de cenas exige anatomia correta. Antes da disponibilização automática, uma revisão independente observa seis quadros distribuídos pelo vídeo, buscando membros, orelhas ou caudas duplicados e alterações de identidade. `QUALITY_REVIEW_MODEL` escolhe o modelo dessa revisão (padrão `gpt-6.1-terra`); o consumo é registrado. Configure seu preço por tokens em Financeiro quando necessário. Vereditos ficam no armazenamento privado ao lado do vídeo (`.quality.json`).
 
 Falhas e casos incertos ficam retidos para revisão; não provocam outra geração paga automaticamente. As prévias de tentativas com falha continuam disponíveis ao administrador. Esta revisão é probabilística e pode deixar passar defeitos entre quadros amostrados; não garante anatomia perfeita. As versões em rascunho também passam pela revisão antes de ficarem prontas para publicação.
+# Dialogue and scene recovery
+
+The shared speech budget applies to all speakers together. Retry feedback includes the rejected JSON and its actual word count, with a per-speaker allocation. Exact text is never rewritten or translated: it is divided into consecutive turns and rejected when it exceeds the configured budget. Staff must obtain approval to shorten an overlong customer message before recovering that item.
+
+Scene review uses `QUALITY_REVIEW_MODEL`, separately from dialogue generation. The default reviewer disables reasoning so its response budget is available for the required JSON verdict. Scene generation explicitly preserves flat 2D artwork rather than converting the characters to 3D. Failed drafts stay private; publish only after checking their frames and speech.

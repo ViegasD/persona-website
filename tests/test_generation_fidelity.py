@@ -52,6 +52,31 @@ async def test_oversized_dialogue_never_silently_generates_generic_content(monke
         await script_writer.generate_structured_script(characters=[script_writer.CharacterSpec("a", "A", "")], recipient_name="Ana", duration_seconds=8)
 
 
+@pytest.mark.asyncio
+async def test_exact_multi_speaker_text_preserves_language_and_rejects_excess_before_api(monkeypatch):
+    call=AsyncMock();monkeypatch.setattr(script_writer,'_chat_json',call)
+    characters=[script_writer.CharacterSpec('bluey','Bluey',''),script_writer.CharacterSpec('bingo','Bingo','')]
+    text='Hey Liam, happy birthday! Play games with Melissa. Hooray!'
+    result=await script_writer.generate_structured_script(characters=characters,recipient_name='Liam',user_message='[Texto exato] '+text,duration_seconds=15)
+    assert ' '.join(result.character_lines)==text and len(result.character_lines)==2
+    with pytest.raises(ValueError,match='Shorten'):
+        await script_writer.generate_structured_script(characters=characters,recipient_name='Liam',user_message='[Texto exato] '+'word '*37,duration_seconds=15)
+    call.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_multi_speaker_retry_includes_rejected_output_and_actual_shared_count(monkeypatch):
+    rejected={'character_lines':['hello '*20,'hello '*20],'group_line':''}
+    valid={'character_lines':['word '*12,'word '*12],'group_line':''}
+    snapshots=[]
+    async def reply(messages):
+        snapshots.append([dict(m) for m in messages]);return rejected if len(snapshots)==1 else valid
+    monkeypatch.setattr(script_writer,'_chat_json',reply)
+    result=await script_writer.generate_structured_script(characters=[script_writer.CharacterSpec('a','A',''),script_writer.CharacterSpec('b','B','')],recipient_name='Liam',duration_seconds=15)
+    assert script_writer.script_fits(result,15)
+    assert snapshots[1][-2]['role']=='assistant' and '40 palavras' in snapshots[1][-1]['content']
+
+
 @pytest.mark.parametrize("values", [{"video_duration_seconds": 16}, {"video_duration_seconds": 3}, {"video_model": "arbitrary-model"}])
 def test_admin_generation_controls_reject_invalid_values(values):
     with pytest.raises(ValidationError):

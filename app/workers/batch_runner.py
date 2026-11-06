@@ -726,6 +726,8 @@ async def _generate_and_store_video(
             action_direction=scene_builder.video_actions(scene_builder.scene_context(occasion_slug,custom_message)),
         )
     )
+    if (custom_message or '').startswith('[Texto exato]'):
+        prompt_text = prompt_text.replace('Brazilian Portuguese', 'the original language of the supplied dialogue (do not translate)')
 
     if revision_id is not None:
         async with session_scope() as session:
